@@ -6,12 +6,14 @@ export default function Page() {
   const [source, setSource] = useState("");
   const [result, setResult] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
 
   async function handleTranslate() {
     if (!source.trim()) return;
 
     setIsLoading(true);
     setResult("");
+    setError("");
 
     try {
       const res = await fetch("/api/translate", {
@@ -21,9 +23,14 @@ export default function Page() {
       });
 
       const data = await res.json();
-      setResult(data?.translated ?? "번역 결과가 비어있어요.");
-    } catch (e) {
-      setResult("에러가 발생했어요.");
+
+      if (!res.ok) {
+        throw new Error(data?.error || "번역 중 오류가 발생했어요.");
+      }
+
+      setResult(data.translated || "");
+    } catch (e: any) {
+      setError(e?.message || "알 수 없는 오류");
     } finally {
       setIsLoading(false);
     }
@@ -67,6 +74,12 @@ export default function Page() {
         >
           {isLoading ? "번역 중..." : "번역하기"}
         </button>
+
+        {error && (
+          <div style={{ color: "#c00", fontSize: 14 }}>
+            {error}
+          </div>
+        )}
 
         <textarea
           value={result}
