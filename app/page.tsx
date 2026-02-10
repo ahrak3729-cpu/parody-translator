@@ -87,17 +87,23 @@ type ItemNode = {
   type: "item";
   name: string; // 표시명(예: "패러디1 · 3화")
   createdAt: number;
-  novelTitle: string; // 예: "코난패러디소설"
-  seriesPath: string; // 예: "코난패러디소설/패러디1"
-  episodeIndex: number; // 0-based
-  episodeLabel: string; // "3화" 같은 라벨
-  sourceText: string; // 원문
-  translatedText: string; // 번역본
+  novelTitle: string;
+  seriesName: string;
+  episodeIndex: number;
+  episodeLabel: string;
+  sourceText: string;
+  translatedText: string;
+
+  // ✅ 자동 저장/중복 방지 키
+  key: string; // novelTitle|seriesName|episodeIndex
 };
 
 type TreeNode = FolderNode | ItemNode;
 
-const STORAGE_KEY = "parody_translator_history_v1";
+const STORAGE_KEY = "parody_translator_history_v2";
+const ROOT_ID = "root";
+const INBOX_ID = "inbox_auto";
+const INBOX_NAME = "미분류(자동저장)";
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -107,16 +113,15 @@ function loadTree(): FolderNode {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return { id: "root", type: "folder", name: "root", children: [] };
+      return { id: ROOT_ID, type: "folder", name: "root", children: [] };
     }
     const parsed = JSON.parse(raw);
-    // 최소 검증
     if (!parsed || parsed.type !== "folder" || !Array.isArray(parsed.children)) {
-      return { id: "root", type: "folder", name: "root", children: [] };
+      return { id: ROOT_ID, type: "folder", name: "root", children: [] };
     }
     return parsed as FolderNode;
   } catch {
-    return { id: "root", type: "folder", name: "root", children: [] };
+    return { id: ROOT_ID, type: "folder", name: "root", children: [] };
   }
 }
 
@@ -160,6 +165,58 @@ function removeNode(root: FolderNode, targetId: string): FolderNode {
   return { ...root, children: filterChildren(root.children) };
 }
 
+function extractNode(root: FolderNode, targetId: string): { nextRoot: FolderNode; extracted: TreeNode | null } {
+  let extracted: TreeNode | null = null;
+
+  function helper(folder: FolderNode): FolderNode {
+    const nextChildren: TreeNode[] = [];
+    for (const child of folder.children) {
+      if (child.id === targetId) {
+        extracted = child;
+        continue;
+      }
+      if (child.type === "folder") nextChildren.push(helper(child));
+      else nextChildren.push(child);
+    }
+    return { ...folder, children: nextChildren };
+  }
+
+  const nextRoot = helper(root);
+  return { nextRoot, extracted };
+}
+
+function findItemByKey(root: FolderNode, key: string): ItemNode | null {
+  for (const child of root.children) {
+    if (child.type === "item" && child.key === key) return child as ItemNode;
+    if (child.type === "folder") {
+      const found = findItemByKey(child, key);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function replaceItemById(root: FolderNode, itemId: string, nextItem: ItemNode): FolderNode {
+  function helper(folder: FolderNode): FolderNode {
+    const nextChildren = folder.children.map((c) => {
+      if (c.type === "item" && c.id === itemId) return nextItem;
+      if (c.type === "folder") return helper(c);
+      return c;
+    });
+    return { ...folder, children: nextChildren };
+  }
+  return helper(root);
+}
+
+function ensureInbox(root: FolderNode): FolderNode {
+  const exists = findNodeById(root, INBOX_ID);
+  if (exists && exists.type === "folder") return root;
+
+  const inbox: FolderNode = { id: INBOX_ID, type: "folder", name: INBOX_NAME, children: [] };
+  // inbox는 루트 최상단에 고정
+  return { ...root, children: [inbox, ...root.children.filter((c) => c.id !== INBOX_ID)] };
+}
+
 function formatDate(ts: number) {
   const d = new Date(ts);
   const yyyy = d.getFullYear();
@@ -171,7 +228,7 @@ function formatDate(ts: number) {
 }
 
 /** =========================
- *  UI
+ *  Page
  *  ========================= */
 export default function Page() {
   // ✅ 임시 회차 데이터 (나중에 URL/목차/저장으로 교체)
@@ -215,31 +272,29 @@ Then a whisper: "You opened the door."`,
   const [progress, setProgress] = useState<Progress>(null);
 
   // ✅ 회차별 번역 캐시
-  const [translatedCache, setTranslatedCache] = useState<Record<number, string>>(
-    {}
-  );
-
+  const [translatedCache, setTranslatedCache] = useState<Record<number, string>>({});
   const abortRef = useRef<AbortController | null>(null);
 
-  // ✅ 기록/폴더 UI 상태
+  // ✅ 기록/폴더 UI
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [tree, setTree] = useState<FolderNode>({ id: "root", type: "folder", name: "root", children: [] });
-  const [selectedFolderId, setSelectedFolderId] = useState<string>("root"); // 저장 대상 폴더
-  const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({ root: true });
+  const [tree, setTree] = useState<FolderNode>({ id: ROOT_ID, type: "folder", name: "root", children: [] });
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(INBOX_ID); // 이동/정리 대상
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({ [ROOT_ID]: true, [INBOX_ID]: true });
+  const [newFolderName, setNewFolderName] = useState("");
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
   useEffect(() => {
-    const loaded = loadTree();
+    const loaded = ensureInbox(loadTree());
     setTree(loaded);
-    setSelectedFolderId("root");
-    setExpandedFolderIds((prev) => ({ ...prev, root: true }));
+    setSelectedFolderId(INBOX_ID);
+    setExpandedFolderIds((prev) => ({ ...prev, [ROOT_ID]: true, [INBOX_ID]: true }));
   }, []);
 
   useEffect(() => {
-    // tree가 바뀔 때마다 저장
     try {
       saveTree(tree);
     } catch {
-      // localStorage가 막혀있으면 무시
+      // ignore
     }
   }, [tree]);
 
@@ -258,18 +313,77 @@ Then a whisper: "You opened the door."`,
     });
 
     const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data?.error || "번역 중 오류가 발생했어요.");
+    if (!res.ok) throw new Error(data?.error || "번역 중 오류가 발생했어요.");
+    return String(data?.translated ?? "");
+  }
+
+  function handleCancel() {
+    abortRef.current?.abort();
+  }
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(result);
+      alert("번역본이 복사되었습니다.");
+    } catch {
+      alert("복사에 실패했습니다. 브라우저 권한을 확인해주세요.");
+    }
+  }
+
+  // ✅ 자동 저장: 번역 완료 시 '미분류(자동저장)'에 저장/업데이트
+  function autoSaveHistory(params: {
+    episodeIndex: number;
+    sourceText: string;
+    translatedText: string;
+  }) {
+    const key = `${novelTitle}|${seriesName}|${params.episodeIndex}`;
+    const episodeLabel = `${params.episodeIndex + 1}화`;
+    const itemName = `${seriesName} · ${episodeLabel}`;
+
+    const existing = findItemByKey(tree, key);
+    if (existing) {
+      // 같은 회차는 "최신 번역"으로 업데이트
+      const nextItem: ItemNode = {
+        ...existing,
+        name: itemName,
+        createdAt: Date.now(),
+        sourceText: params.sourceText,
+        translatedText: params.translatedText,
+        episodeLabel,
+        episodeIndex: params.episodeIndex,
+        novelTitle,
+        seriesName,
+        key,
+      };
+      const nextTree = replaceItemById(tree, existing.id, nextItem);
+      setTree(nextTree);
+      return;
     }
 
-    return String(data?.translated ?? "");
+    const item: ItemNode = {
+      id: uid(),
+      type: "item",
+      name: itemName,
+      createdAt: Date.now(),
+      novelTitle,
+      seriesName,
+      episodeIndex: params.episodeIndex,
+      episodeLabel,
+      sourceText: params.sourceText,
+      translatedText: params.translatedText,
+      key,
+    };
+
+    // inbox 맨 위에 추가
+    const nextTree = updateFolderChildren(tree, INBOX_ID, (children) => [item, ...children]);
+    setTree(nextTree);
   }
 
   async function runTranslation(text: string, cacheKey?: number) {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // ✅ 캐시가 있으면 즉시 표시
+    // ✅ 캐시 있으면 즉시 표시 + (자동저장은 이미 되어있다고 가정)
     if (cacheKey !== undefined && translatedCache[cacheKey]) {
       setResult(translatedCache[cacheKey]);
       setError("");
@@ -287,11 +401,8 @@ Then a whisper: "You opened the door."`,
 
     try {
       const chunks = chunkTextByParagraphs(trimmed, 4500);
-
       if (chunks.length > 60) {
-        throw new Error(
-          `회차가 너무 길어서 (${chunks.length}조각) 자동 처리 부담이 큽니다. 한 번에 넣는 분량을 줄여 주세요.`
-        );
+        throw new Error(`회차가 너무 길어서 (${chunks.length}조각) 자동 처리 부담이 큽니다. 한 번에 넣는 분량을 줄여 주세요.`);
       }
 
       setProgress({ current: 0, total: chunks.length });
@@ -299,12 +410,9 @@ Then a whisper: "You opened the door."`,
       let out = "";
       for (let i = 0; i < chunks.length; i++) {
         setProgress({ current: i, total: chunks.length });
-
         const translated = await translateOneChunk(chunks[i], controller.signal);
-
         if (!out) out = translated.trimEnd();
         else out += "\n\n" + translated.trimEnd();
-
         setResult(out);
       }
 
@@ -313,29 +421,15 @@ Then a whisper: "You opened the door."`,
 
       if (cacheKey !== undefined) {
         setTranslatedCache((prev) => ({ ...prev, [cacheKey]: out }));
+        // ✅ 자동 저장
+        autoSaveHistory({ episodeIndex: cacheKey, sourceText: trimmed, translatedText: out });
       }
     } catch (e: any) {
-      if (e?.name === "AbortError") {
-        setError("번역이 취소되었습니다.");
-      } else {
-        setError(e?.message || "알 수 없는 오류");
-      }
+      if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
+      else setError(e?.message || "알 수 없는 오류");
     } finally {
       setIsLoading(false);
       abortRef.current = null;
-    }
-  }
-
-  function handleCancel() {
-    abortRef.current?.abort();
-  }
-
-  async function handleCopy() {
-    try {
-      await navigator.clipboard.writeText(result);
-      alert("번역본이 복사되었습니다.");
-    } catch {
-      alert("복사에 실패했습니다. 브라우저 권한을 확인해주세요.");
     }
   }
 
@@ -343,9 +437,7 @@ Then a whisper: "You opened the door."`,
   const hasNext = episodeIndex < episodes.length - 1;
 
   const percent =
-    progress && progress.total > 0
-      ? Math.floor((progress.current / progress.total) * 100)
-      : 0;
+    progress && progress.total > 0 ? Math.floor((progress.current / progress.total) * 100) : 0;
 
   function goToEpisode(nextIndex: number) {
     const nextText = episodes[nextIndex] ?? "";
@@ -354,23 +446,14 @@ Then a whisper: "You opened the door."`,
     setResult("");
     setError("");
     setProgress(null);
-
-    void runTranslation(nextText, nextIndex);
+    void runTranslation(nextText, nextIndex); // ✅ 다음/이전화 누르면 자동 번역 + 자동저장
   }
 
   /** =========================
-   *  History actions
+   *  Folder actions (정리용)
    *  ========================= */
-
   function toggleExpand(folderId: string) {
     setExpandedFolderIds((prev) => ({ ...prev, [folderId]: !prev[folderId] }));
-  }
-
-  function ensureSelectedFolderExists(nextTree: FolderNode) {
-    const found = findNodeById(nextTree, selectedFolderId);
-    if (!found || found.type !== "folder") {
-      setSelectedFolderId("root");
-    }
   }
 
   function createFolder(parentFolderId: string, name: string) {
@@ -384,50 +467,40 @@ Then a whisper: "You opened the door."`,
       children: [],
     };
 
-    const nextTree = updateFolderChildren(tree, parentFolderId, (children) => [
-      ...children,
-      newFolder,
-    ]);
-
+    const nextTree = updateFolderChildren(tree, parentFolderId, (children) => [...children, newFolder]);
     setTree(nextTree);
     setExpandedFolderIds((prev) => ({ ...prev, [parentFolderId]: true, [newFolder.id]: true }));
   }
 
-  function saveCurrentTranslationToFolder(folderId: string) {
-    const folder = findNodeById(tree, folderId);
-    if (!folder || folder.type !== "folder") {
-      alert("저장할 폴더를 선택해 주세요.");
+  function moveSelectedItemToFolder(targetFolderId: string) {
+    if (!selectedItemId) {
+      alert("이동할 항목을 먼저 선택해 주세요.");
       return;
     }
-    if (!result.trim()) {
-      alert("저장할 번역 결과가 없습니다.");
+    const target = findNodeById(tree, targetFolderId);
+    if (!target || target.type !== "folder") {
+      alert("이동할 폴더를 선택해 주세요.");
       return;
     }
 
-    const episodeLabel = `${episodeIndex + 1}화`;
-    const itemName = `${seriesName} · ${episodeLabel}`;
+    // 같은 폴더로 이동 방지(대충)
+    const { nextRoot, extracted } = extractNode(tree, selectedItemId);
+    if (!extracted) return;
 
-    const item: ItemNode = {
-      id: uid(),
-      type: "item",
-      name: itemName,
-      createdAt: Date.now(),
-      novelTitle,
-      seriesPath: `${novelTitle}/${seriesName}`,
-      episodeIndex,
-      episodeLabel,
-      sourceText: source,
-      translatedText: result,
-    };
-
-    const nextTree = updateFolderChildren(tree, folderId, (children) => [
-      item,
-      ...children, // 최신 저장이 위로
-    ]);
-
+    const nextTree = updateFolderChildren(nextRoot, targetFolderId, (children) => [extracted, ...children]);
     setTree(nextTree);
-    setExpandedFolderIds((prev) => ({ ...prev, [folderId]: true }));
-    alert("저장 완료!");
+    setSelectedItemId(null);
+    alert("이동 완료!");
+  }
+
+  function deleteNodeById(nodeId: string) {
+    if (nodeId === ROOT_ID || nodeId === INBOX_ID) return;
+    const ok = confirm("삭제할까요? (폴더면 안의 항목도 함께 삭제됩니다)");
+    if (!ok) return;
+
+    const nextTree = removeNode(tree, nodeId);
+    setTree(nextTree);
+    if (selectedItemId === nodeId) setSelectedItemId(null);
   }
 
   function loadItemToViewer(item: ItemNode) {
@@ -436,29 +509,11 @@ Then a whisper: "You opened the door."`,
     setResult(item.translatedText);
     setError("");
     setProgress(null);
-
-    // 캐시에도 넣어두면 회차 이동 시 즉시 표시
     setTranslatedCache((prev) => ({ ...prev, [item.episodeIndex]: item.translatedText }));
     setIsHistoryOpen(false);
   }
 
-  function deleteNodeById(nodeId: string) {
-    if (nodeId === "root") return;
-    const ok = confirm("삭제할까요? (폴더면 안의 항목도 함께 삭제됩니다)");
-    if (!ok) return;
-
-    const nextTree = removeNode(tree, nodeId);
-    setTree(nextTree);
-    ensureSelectedFolderExists(nextTree);
-  }
-
-  function FolderTree({
-    folder,
-    depth,
-  }: {
-    folder: FolderNode;
-    depth: number;
-  }) {
+  function FolderTree({ folder, depth }: { folder: FolderNode; depth: number }) {
     const isExpanded = !!expandedFolderIds[folder.id];
 
     return (
@@ -471,8 +526,7 @@ Then a whisper: "You opened the door."`,
             padding: "6px 8px",
             marginLeft: depth * 12,
             borderRadius: 8,
-            background:
-              selectedFolderId === folder.id ? "rgba(0,0,0,0.06)" : "transparent",
+            background: selectedFolderId === folder.id ? "rgba(0,0,0,0.06)" : "transparent",
           }}
         >
           <button
@@ -483,7 +537,7 @@ Then a whisper: "You opened the door."`,
               borderRadius: 8,
               border: "1px solid #ddd",
               cursor: "pointer",
-              fontWeight: 800,
+              fontWeight: 900,
             }}
             title={isExpanded ? "접기" : "펼치기"}
           >
@@ -496,16 +550,16 @@ Then a whisper: "You opened the door."`,
               border: "none",
               background: "transparent",
               cursor: "pointer",
-              fontWeight: 800,
+              fontWeight: 900,
               textAlign: "left",
               flex: 1,
             }}
-            title="이 폴더에 저장"
+            title="정리(이동) 대상 폴더 선택"
           >
-            📁 {folder.name === "root" ? "기록" : folder.name}
+            📁 {folder.id === ROOT_ID ? "최상위" : folder.name}
           </button>
 
-          {folder.id !== "root" && (
+          {folder.id !== ROOT_ID && folder.id !== INBOX_ID && (
             <button
               onClick={() => deleteNodeById(folder.id)}
               style={{
@@ -525,25 +579,18 @@ Then a whisper: "You opened the door."`,
         {isExpanded && (
           <div style={{ marginTop: 4 }}>
             {folder.children.length === 0 ? (
-              <div
-                style={{
-                  marginLeft: depth * 12 + 44,
-                  opacity: 0.6,
-                  fontSize: 13,
-                  padding: "4px 0",
-                }}
-              >
+              <div style={{ marginLeft: depth * 12 + 44, opacity: 0.6, fontSize: 13, padding: "4px 0" }}>
                 (비어 있음)
               </div>
             ) : (
               folder.children.map((child) => {
                 if (child.type === "folder") {
-                  return (
-                    <FolderTree key={child.id} folder={child} depth={depth + 1} />
-                  );
+                  return <FolderTree key={child.id} folder={child} depth={depth + 1} />;
                 }
 
                 const item = child as ItemNode;
+                const isSelected = selectedItemId === item.id;
+
                 return (
                   <div
                     key={item.id}
@@ -554,10 +601,25 @@ Then a whisper: "You opened the door."`,
                       padding: "6px 8px",
                       marginLeft: (depth + 1) * 12 + 32,
                       borderRadius: 8,
-                      border: "1px solid #eee",
+                      border: isSelected ? "2px solid #888" : "1px solid #eee",
                       background: "#fff",
                     }}
                   >
+                    <button
+                      onClick={() => setSelectedItemId(item.id)}
+                      style={{
+                        width: 34,
+                        height: 28,
+                        borderRadius: 8,
+                        border: "1px solid #ddd",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      title="이동할 항목으로 선택"
+                    >
+                      {isSelected ? "✔" : "○"}
+                    </button>
+
                     <button
                       onClick={() => loadItemToViewer(item)}
                       style={{
@@ -569,9 +631,9 @@ Then a whisper: "You opened the door."`,
                       }}
                       title="불러오기"
                     >
-                      <div style={{ fontWeight: 800 }}>{item.name}</div>
+                      <div style={{ fontWeight: 900 }}>{item.name}</div>
                       <div style={{ fontSize: 12, opacity: 0.65 }}>
-                        {item.seriesPath} · {formatDate(item.createdAt)}
+                        {item.novelTitle}/{item.seriesName} · {formatDate(item.createdAt)}
                       </div>
                     </button>
 
@@ -588,7 +650,7 @@ Then a whisper: "You opened the door."`,
                         borderRadius: 8,
                         border: "1px solid #ddd",
                         cursor: "pointer",
-                        fontWeight: 800,
+                        fontWeight: 900,
                       }}
                       title="저장본 복사"
                     >
@@ -618,24 +680,12 @@ Then a whisper: "You opened the door."`,
     );
   }
 
-  // 팝업에서 폴더 생성 입력 상태
-  const [newFolderName, setNewFolderName] = useState("");
-
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
       {/* 상단 바 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 10,
-        }}
-      >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div>
-          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>
-            Parody Translator
-          </h1>
+          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
           <div style={{ opacity: 0.7, marginTop: 4, fontSize: 13 }}>
             {novelTitle} · {seriesName} · {episodeIndex + 1}/{episodes.length}화
           </div>
@@ -643,14 +693,7 @@ Then a whisper: "You opened the door."`,
 
         <button
           onClick={() => setIsHistoryOpen(true)}
-          style={{
-            height: 40,
-            padding: "0 14px",
-            borderRadius: 10,
-            border: "1px solid #ddd",
-            cursor: "pointer",
-            fontWeight: 800,
-          }}
+          style={{ height: 40, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
           title="번역 기록"
         >
           🗂 기록
@@ -659,8 +702,7 @@ Then a whisper: "You opened the door."`,
 
       <div style={{ opacity: 0.75, marginBottom: 12 }}>
         <div>
-          예상 분할: {chunksPreview.chunksCount}조각 · 글자수:{" "}
-          {chunksPreview.totalChars.toLocaleString()}자
+          예상 분할: {chunksPreview.chunksCount}조각 · 글자수: {chunksPreview.totalChars.toLocaleString()}자
         </div>
       </div>
 
@@ -669,30 +711,15 @@ Then a whisper: "You opened the door."`,
           value={source}
           onChange={(e) => setSource(e.target.value)}
           placeholder="여기에 원문을 붙여넣기…"
-          style={{
-            width: "100%",
-            minHeight: 180,
-            padding: 12,
-            fontSize: 14,
-            borderRadius: 10,
-            border: "1px solid #ddd",
-            outline: "none",
-          }}
+          style={{ width: "100%", minHeight: 180, padding: 12, fontSize: 14, borderRadius: 10, border: "1px solid #ddd", outline: "none" }}
         />
 
         {/* 번역 실행 */}
         <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <button
-            onClick={() => runTranslation(source, undefined)}
+            onClick={() => runTranslation(source, episodeIndex)}
             disabled={isLoading}
-            style={{
-              height: 44,
-              padding: "0 14px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              cursor: isLoading ? "not-allowed" : "pointer",
-              fontWeight: 800,
-            }}
+            style={{ height: 44, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: isLoading ? "not-allowed" : "pointer", fontWeight: 900 }}
           >
             {isLoading ? "번역 중..." : "번역하기"}
           </button>
@@ -700,14 +727,7 @@ Then a whisper: "You opened the door."`,
           {isLoading && (
             <button
               onClick={handleCancel}
-              style={{
-                height: 44,
-                padding: "0 14px",
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                cursor: "pointer",
-                fontWeight: 800,
-              }}
+              style={{ height: 44, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
             >
               취소
             </button>
@@ -741,14 +761,7 @@ Then a whisper: "You opened the door."`,
         />
 
         {/* 하단 네비 + 복사 */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginTop: 6,
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
           <button
             onClick={() => goToEpisode(episodeIndex - 1)}
             disabled={!hasPrev || isLoading}
@@ -758,48 +771,29 @@ Then a whisper: "You opened the door."`,
               borderRadius: 10,
               border: "1px solid #ddd",
               cursor: !hasPrev || isLoading ? "not-allowed" : "pointer",
-              fontWeight: 800,
+              fontWeight: 900,
               opacity: !hasPrev ? 0.5 : 1,
             }}
           >
             이전화
           </button>
 
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              onClick={handleCopy}
-              disabled={!result.trim()}
-              title="번역본 복사"
-              style={{
-                height: 42,
-                width: 48,
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                cursor: !result.trim() ? "not-allowed" : "pointer",
-                fontWeight: 900,
-                opacity: !result.trim() ? 0.5 : 1,
-              }}
-            >
-              📋
-            </button>
-
-            <button
-              onClick={() => saveCurrentTranslationToFolder(selectedFolderId)}
-              disabled={!result.trim()}
-              title="선택한 폴더에 저장"
-              style={{
-                height: 42,
-                padding: "0 12px",
-                borderRadius: 10,
-                border: "1px solid #ddd",
-                cursor: !result.trim() ? "not-allowed" : "pointer",
-                fontWeight: 900,
-                opacity: !result.trim() ? 0.5 : 1,
-              }}
-            >
-              💾 저장
-            </button>
-          </div>
+          <button
+            onClick={handleCopy}
+            disabled={!result.trim()}
+            title="번역본 복사"
+            style={{
+              height: 42,
+              width: 48,
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              cursor: !result.trim() ? "not-allowed" : "pointer",
+              fontWeight: 900,
+              opacity: !result.trim() ? 0.5 : 1,
+            }}
+          >
+            📋
+          </button>
 
           <button
             onClick={() => goToEpisode(episodeIndex + 1)}
@@ -810,7 +804,7 @@ Then a whisper: "You opened the door."`,
               borderRadius: 10,
               border: "1px solid #ddd",
               cursor: !hasNext || isLoading ? "not-allowed" : "pointer",
-              fontWeight: 800,
+              fontWeight: 900,
               opacity: !hasNext ? 0.5 : 1,
             }}
           >
@@ -850,85 +844,59 @@ Then a whisper: "You opened the door."`,
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 10,
-                marginBottom: 10,
-              }}
-            >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>번역 기록</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>번역 기록 (자동 저장됨)</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  폴더를 선택하면 아래의 “💾 저장” 버튼이 그 폴더로 저장됩니다.
+                  1) 번역하면 “{INBOX_NAME}”에 자동으로 쌓임 → 2) 새 폴더 만들고 → 3) 항목 선택(○) 후 “선택 폴더로 이동”
                 </div>
               </div>
 
               <button
                 onClick={() => setIsHistoryOpen(false)}
-                style={{
-                  height: 36,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
               >
                 닫기
               </button>
             </div>
 
-            {/* 폴더 생성 */}
-            <div
-              style={{
-                display: "flex",
-                gap: 8,
-                alignItems: "center",
-                marginBottom: 12,
-                flexWrap: "wrap",
-              }}
-            >
+            {/* 폴더 생성 + 이동 */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
               <input
                 value={newFolderName}
                 onChange={(e) => setNewFolderName(e.target.value)}
                 placeholder="새 폴더 이름 (선택한 폴더 안에 생성)"
-                style={{
-                  height: 38,
-                  padding: "0 10px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  minWidth: 280,
-                }}
+                style={{ height: 38, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 280 }}
               />
               <button
                 onClick={() => {
                   createFolder(selectedFolderId, newFolderName);
                   setNewFolderName("");
                 }}
-                style={{
-                  height: 38,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
+                style={{ height: 38, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
               >
                 📁 폴더 생성
               </button>
 
+              <button
+                onClick={() => moveSelectedItemToFolder(selectedFolderId)}
+                style={{ height: 38, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
+                title="선택한 항목(○)을 선택한 폴더로 이동"
+              >
+                📦 선택 폴더로 이동
+              </button>
+
               <div style={{ fontSize: 12, opacity: 0.7 }}>
-                현재 저장 대상:{" "}
+                현재 선택 폴더:{" "}
                 <b>
                   {(() => {
                     const n = findNodeById(tree, selectedFolderId);
-                    if (!n || n.type !== "folder") return "기록";
-                    return n.id === "root" ? "기록" : n.name;
+                    if (!n || n.type !== "folder") return "최상위";
+                    return n.id === ROOT_ID ? "최상위" : n.name;
                   })()}
                 </b>
+                {" · "}
+                이동할 항목: <b>{selectedItemId ? "선택됨" : "없음"}</b>
               </div>
             </div>
 
