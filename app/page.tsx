@@ -51,9 +51,8 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // "복사용 최종 텍스트" (URL모드면 헤더 포함, 수동모드면 본문만)
+  translatedText: string;
   url?: string;
-  mode?: "url" | "manual"; // ✅ 추가: 어떤 방식으로 번역했는지
 };
 
 const STORAGE_KEY = "parody_translator_history_v3";
@@ -135,8 +134,7 @@ export default function Page() {
      원문 / 결과
   ========================= */
   const [source, setSource] = useState("");
-  const [resultBody, setResultBody] = useState(""); // ✅ 변경: 번역 "본문"만 저장
-  const [resultMode, setResultMode] = useState<"url" | "manual" | null>(null); // ✅ 추가
+  const [result, setResult] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
@@ -154,6 +152,19 @@ export default function Page() {
   });
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
 
+  // ✅ 페이지네이션
+  const PAGE_SIZE = 8;
+  const [historyPage, setHistoryPage] = useState(1); // 1-based
+
+  const totalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(history.length / PAGE_SIZE));
+  }, [history.length]);
+
+  const pagedHistory = useMemo(() => {
+    const start = (historyPage - 1) * PAGE_SIZE;
+    return history.slice(start, start + PAGE_SIZE);
+  }, [history, historyPage]);
+
   const currentIndex = useMemo(() => {
     if (!currentHistoryId) return -1;
     return history.findIndex((h) => h.id === currentHistoryId);
@@ -163,7 +174,9 @@ export default function Page() {
   const canNext = currentIndex > 0; // 다음(더 최신)은 index-1
 
   const percent =
-    progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
+    progress && progress.total
+      ? Math.floor((progress.current / progress.total) * 100)
+      : 0;
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
@@ -186,19 +199,17 @@ export default function Page() {
     const data = await safeReadJson(res);
 
     if (!res.ok) {
-      const msg = (data && ((data as any).error || (data as any).message)) || "번역 실패";
+      const msg =
+        (data && (data.error || data.message)) ||
+        "번역 실패";
       throw new Error(String(msg));
     }
 
     return String((data as any)?.translated ?? "");
   }
 
-  // ✅ URL 모드일 때만 "복사/저장용" 최종 텍스트(헤더 포함)
-  function buildCopyText(mode: "url" | "manual", body: string) {
-    const b = body.trim();
-    if (!b) return "";
-    if (mode === "manual") return b;
-    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${b}`;
+  function buildViewerText(body: string) {
+    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${body.trim()}`;
   }
 
   function autoSaveToHistory(params: {
@@ -208,30 +219,24 @@ export default function Page() {
     seriesTitle: string;
     episodeNo: number;
     subtitle: string;
-    mode: "url" | "manual";
   }) {
     const item: HistoryItem = {
       id: uid(),
       createdAt: Date.now(),
-      // ✅ 수동번역은 히스토리 라벨이 헷갈리지 않게 고정
-      seriesTitle:
-        params.mode === "manual"
-          ? "텍스트번역"
-          : params.seriesTitle.trim() || "패러디소설",
-      episodeNo:
-        params.mode === "manual"
-          ? 1
-          : Math.max(1, Math.floor(params.episodeNo || 1)),
-      subtitle: params.mode === "manual" ? "" : params.subtitle.trim(),
+      seriesTitle: params.seriesTitle.trim() || "패러디소설",
+      episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
+      subtitle: params.subtitle.trim(),
       sourceText: params.sourceText,
       translatedText: params.translatedText,
       url: params.url?.trim() || undefined,
-      mode: params.mode,
     };
 
     const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
     setHistory(next);
     setCurrentHistoryId(item.id);
+
+    // ✅ 새로 추가되면 1페이지로 이동(최신이 0번이니까)
+    setHistoryPage(1);
 
     try {
       saveHistory(next);
@@ -243,20 +248,7 @@ export default function Page() {
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
-
-    // ✅ 히스토리는 translatedText가 "복사용 최종 텍스트"이므로
-    // 화면 표시는 모드에 따라 분리해서 보여주기
-    const mode: "url" | "manual" = it.mode === "manual" ? "manual" : "url";
-    setResultMode(mode);
-
-    if (mode === "manual") {
-      setResultBody(it.translatedText); // 본문만
-    } else {
-      // 헤더(2줄 + 공백) 제거 후 본문만 저장
-      const body = it.translatedText.replace(/^.*\n.*\n\n\n/, "");
-      setResultBody(body);
-    }
-
+    setResult(it.translatedText);
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
@@ -275,10 +267,13 @@ export default function Page() {
       if (next[0]) loadHistoryItem(next[0]);
       else {
         setSource("");
-        setResultBody("");
-        setResultMode(null);
+        setResult("");
       }
     }
+
+    // ✅ 삭제 후 페이지 범위 보정
+    const nextTotalPages = Math.max(1, Math.ceil(next.length / PAGE_SIZE));
+    setHistoryPage((p) => Math.min(p, nextTotalPages));
 
     try {
       saveHistory(next);
@@ -310,20 +305,37 @@ export default function Page() {
     if (it) loadHistoryItem(it);
   }
 
+  // ✅ 히스토리 수동 추가 (오른쪽 하단 ➕)
+  function addCurrentToHistory() {
+    const src = source.trim();
+    const res = result.trim();
+
+    if (!src || !res) {
+      alert("저장할 원문/번역 결과가 없어요.\n먼저 번역하거나 텍스트를 붙여넣어줘.");
+      return;
+    }
+
+    autoSaveToHistory({
+      sourceText: src,
+      translatedText: res,
+      url: url.trim() || undefined,
+      seriesTitle: headerPreview.title,
+      episodeNo,
+      subtitle,
+    });
+
+    alert("히스토리에 추가했어요.");
+  }
+
   /* =========================
      번역 실행
   ========================= */
-  async function runTranslation(
-    text: string,
-    mode: "url" | "manual",
-    sourceUrl?: string
-  ) {
+  async function runTranslation(text: string, sourceUrl?: string) {
     if (!text.trim()) return;
 
     setIsLoading(true);
     setError("");
-    setResultBody("");
-    setResultMode(mode);
+    setResult("");
     setProgress(null);
 
     abortRef.current?.abort();
@@ -345,20 +357,17 @@ export default function Page() {
         out += (out ? "\n\n" : "") + t.trim();
       }
 
-      const bodyOnly = out.trim();
-      setResultBody(bodyOnly);
+      const finalText = buildViewerText(out);
+      setResult(finalText);
       setProgress({ current: chunks.length, total: chunks.length });
-
-      const copyText = buildCopyText(mode, bodyOnly);
 
       autoSaveToHistory({
         sourceText: text.trim(),
-        translatedText: copyText,
+        translatedText: finalText,
         url: sourceUrl,
         seriesTitle: headerPreview.title,
         episodeNo,
         subtitle,
-        mode,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -389,7 +398,10 @@ export default function Page() {
       const data: any = await safeReadJson(res);
 
       if (!res.ok) {
-        const msg = data?.error || data?.message || "본문 불러오기 실패";
+        const msg =
+          data?.error ||
+          data?.message ||
+          "본문 불러오기 실패";
         throw new Error(String(msg));
       }
 
@@ -410,8 +422,8 @@ export default function Page() {
 
       setSource(text);
 
-      // ✅ URL 불러오면 URL 모드로 번역
-      await runTranslation(text, "url", u);
+      // URL 불러오면 바로 번역까지
+      await runTranslation(text, u);
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
     } finally {
@@ -419,27 +431,13 @@ export default function Page() {
     }
   }
 
-  const copyTargetText = useMemo(() => {
-    if (!resultBody.trim()) return "";
-    const mode = resultMode ?? "manual";
-    return buildCopyText(mode, resultBody);
-  }, [resultBody, resultMode, headerPreview.title, headerPreview.epLine]);
-
   /* =========================
      UI
   ========================= */
   return (
     <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86 }}>
       {/* 상단바 + 히스토리 버튼 */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          marginBottom: 14,
-        }}
-      >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
           <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
@@ -448,7 +446,10 @@ export default function Page() {
         </div>
 
         <button
-          onClick={() => setHistoryOpen(true)}
+          onClick={() => {
+            setHistoryOpen(true);
+            setHistoryPage(1); // 열 때는 최신 페이지로
+          }}
           style={{
             height: 40,
             padding: "0 14px",
@@ -517,7 +518,7 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
             <button
-              onClick={() => runTranslation(source, "manual")}
+              onClick={() => runTranslation(source)}
               disabled={isLoading || !source.trim()}
               style={{
                 height: 40,
@@ -559,23 +560,11 @@ export default function Page() {
         </div>
       </details>
 
-      {error && (
-        <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>
-          {error}
-        </div>
-      )}
+      {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
 
       {/* 결과: Viewer 스타일 */}
       <div style={{ marginTop: 14 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 10,
-            marginBottom: 8,
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
           <div style={{ fontWeight: 900, opacity: 0.85 }}>번역 결과</div>
         </div>
 
@@ -590,9 +579,9 @@ export default function Page() {
             lineHeight: 1.7,
           }}
         >
-          {!resultBody.trim() ? (
+          {!result.trim() ? (
             <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
-          ) : resultMode === "url" ? (
+          ) : (
             <>
               <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
                 {headerPreview.title}
@@ -600,11 +589,10 @@ export default function Page() {
               <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>
                 {headerPreview.epLine}
               </div>
-              <div style={{ fontSize: 16 }}>{resultBody}</div>
+              <div style={{ fontSize: 16 }}>
+                {result.replace(/^.*\n.*\n\n\n/, "")}
+              </div>
             </>
-          ) : (
-            // ✅ 수동 번역은 헤더 없이 본문만
-            <div style={{ fontSize: 16 }}>{resultBody}</div>
           )}
         </div>
       </div>
@@ -637,18 +625,11 @@ export default function Page() {
               borderRadius: 14,
               border: "1px solid #ddd",
               padding: 14,
+              position: "relative", // ✅ 오른쪽 하단 ➕ 배치용
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 10,
-                marginBottom: 10,
-              }}
-            >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
@@ -675,82 +656,147 @@ export default function Page() {
             {history.length === 0 ? (
               <div style={{ opacity: 0.65, padding: 10 }}>(저장된 항목이 아직 없어요)</div>
             ) : (
-              <div style={{ display: "grid", gap: 10 }}>
-                {history.map((it) => {
-                  const isManual = it.mode === "manual";
-                  const label = isManual
-                    ? `텍스트번역`
-                    : it.subtitle
-                    ? `${it.seriesTitle} · ${it.episodeNo}화 · ${it.subtitle}`
-                    : `${it.seriesTitle} · ${it.episodeNo}화`;
+              <>
+                <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
+                  {pagedHistory.map((it) => {
+                    const label = it.subtitle
+                      ? `${it.seriesTitle} · ${it.episodeNo}화 · ${it.subtitle}`
+                      : `${it.seriesTitle} · ${it.episodeNo}화`;
 
-                  return (
-                    <div
-                      key={it.id}
-                      style={{
-                        border: "1px solid #eee",
-                        borderRadius: 12,
-                        padding: 12,
-                        background: "#fff",
-                        display: "flex",
-                        gap: 10,
-                        alignItems: "center",
-                      }}
-                    >
-                      <button
-                        onClick={() => loadHistoryItem(it)}
+                    return (
+                      <div
+                        key={it.id}
                         style={{
-                          flex: 1,
-                          border: "none",
-                          background: "transparent",
-                          cursor: "pointer",
-                          textAlign: "left",
-                        }}
-                        title="불러오기"
-                      >
-                        <div style={{ fontWeight: 900 }}>{label}</div>
-                        <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
-                          {formatDate(it.createdAt)}
-                          {it.url ? ` · URL 저장됨` : ""}
-                        </div>
-                      </button>
-
-                      <button
-                        onClick={() => handleCopy(it.translatedText)}
-                        style={{
-                          width: 46,
-                          height: 34,
-                          borderRadius: 10,
-                          border: "1px solid #ddd",
-                          cursor: "pointer",
-                          fontWeight: 900,
+                          border: "1px solid #eee",
+                          borderRadius: 12,
+                          padding: 12,
                           background: "#fff",
+                          display: "flex",
+                          gap: 10,
+                          alignItems: "center",
                         }}
-                        title="번역본 복사"
                       >
-                        📋
-                      </button>
+                        <button
+                          onClick={() => loadHistoryItem(it)}
+                          style={{
+                            flex: 1,
+                            border: "none",
+                            background: "transparent",
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                          title="불러오기"
+                        >
+                          <div style={{ fontWeight: 900 }}>{label}</div>
+                          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                            {formatDate(it.createdAt)}
+                            {it.url ? ` · URL 저장됨` : ""}
+                          </div>
+                        </button>
 
-                      <button
-                        onClick={() => deleteHistoryItem(it.id)}
-                        style={{
-                          width: 44,
-                          height: 34,
-                          borderRadius: 10,
-                          border: "1px solid #ddd",
-                          cursor: "pointer",
-                          fontWeight: 900,
-                          background: "#fff",
-                        }}
-                        title="삭제"
-                      >
-                        🗑
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
+                        <button
+                          onClick={() => handleCopy(it.translatedText)}
+                          style={{
+                            width: 46,
+                            height: 34,
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            background: "#fff",
+                          }}
+                          title="번역본 복사"
+                        >
+                          📋
+                        </button>
+
+                        <button
+                          onClick={() => deleteHistoryItem(it.id)}
+                          style={{
+                            width: 44,
+                            height: 34,
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            background: "#fff",
+                          }}
+                          title="삭제"
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* ✅ 페이지네이션: 하단 중앙 */}
+                {totalPages > 1 && (
+                  <div
+                    style={{
+                      position: "sticky",
+                      bottom: 0,
+                      background: "#fff",
+                      paddingTop: 10,
+                      paddingBottom: 10,
+                      borderTop: "1px solid #eee",
+                      display: "flex",
+                      justifyContent: "center",
+                      gap: 6,
+                    }}
+                  >
+                    {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => {
+                      const active = p === historyPage;
+                      return (
+                        <button
+                          key={p}
+                          onClick={() => setHistoryPage(p)}
+                          style={{
+                            minWidth: 34,
+                            height: 32,
+                            padding: "0 10px",
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            background: active ? "#111" : "#fff",
+                            color: active ? "#fff" : "#111",
+                          }}
+                          title={`${p}페이지`}
+                        >
+                          {p}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
             )}
+
+            {/* ✅ 오른쪽 하단 ➕ 파일추가 */}
+            <button
+              onClick={addCurrentToHistory}
+              style={{
+                position: "absolute",
+                right: 14,
+                bottom: 14,
+                width: 52,
+                height: 52,
+                borderRadius: 18,
+                border: "1px solid #ddd",
+                background: "#fff",
+                fontWeight: 900,
+                cursor: "pointer",
+                boxShadow: "0 10px 24px rgba(0,0,0,0.12)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 22,
+              }}
+              title="현재 원문/번역을 히스토리에 추가"
+            >
+              ➕
+            </button>
           </div>
         </div>
       )}
@@ -798,8 +844,8 @@ export default function Page() {
           </button>
 
           <button
-            onClick={() => handleCopy(copyTargetText)}
-            disabled={!copyTargetText.trim()}
+            onClick={() => handleCopy(result || "")}
+            disabled={!result.trim()}
             style={{
               height: 40,
               padding: "0 14px",
@@ -807,8 +853,8 @@ export default function Page() {
               border: "1px solid #ddd",
               background: "#fff",
               fontWeight: 900,
-              cursor: copyTargetText.trim() ? "pointer" : "not-allowed",
-              opacity: copyTargetText.trim() ? 1 : 0.5,
+              cursor: result.trim() ? "pointer" : "not-allowed",
+              opacity: result.trim() ? 1 : 0.5,
             }}
           >
             📋 복사
