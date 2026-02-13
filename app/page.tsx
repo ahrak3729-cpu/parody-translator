@@ -51,11 +51,11 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // 본문만 저장
+  translatedText: string;
   url?: string;
 
   folderId?: string | null;
-  showHeader?: boolean; // 저장 당시 보여줬는지
+  showHeader?: boolean; // 히스토리 항목별로 ON/OFF 저장
 };
 
 type HistoryFolder = {
@@ -71,10 +71,6 @@ type AppSettings = {
   lineHeight: number; // CSS number
   containerMaxWidth: number; // px
 
-  // Header rules
-  showHeaderForUrl: boolean;
-  showHeaderForManual: boolean;
-
   // Theme
   theme: "light" | "dark";
 };
@@ -83,10 +79,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   fontSize: 16,
   lineHeight: 1.7,
   containerMaxWidth: 860,
-
-  showHeaderForUrl: true,
-  showHeaderForManual: false,
-
   theme: "light",
 };
 
@@ -186,13 +178,13 @@ async function dbReplaceAll<T extends { id: string }>(storeName: string, items: 
   });
 }
 
-async function dbGetSettings(): Promise<AppSettings | null> {
+async function dbGetSettings(): Promise<any | null> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_SETTINGS, "readonly");
     const store = tx.objectStore(STORE_SETTINGS);
     const req = store.get(SETTINGS_KEY);
-    req.onsuccess = () => resolve((req.result?.value as AppSettings) ?? null);
+    req.onsuccess = () => resolve(req.result?.value ?? null);
     req.onerror = () => reject(req.error);
   });
 }
@@ -310,7 +302,7 @@ export default function Page() {
 
     (async () => {
       try {
-        const [h, f, s] = await Promise.all([
+        const [h, f, sRaw] = await Promise.all([
           dbGetAll<HistoryItem>(STORE_HISTORY),
           dbGetAll<HistoryFolder>(STORE_FOLDERS),
           dbGetSettings(),
@@ -320,11 +312,21 @@ export default function Page() {
 
         const nextHistory = (h || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         const nextFolders = (f || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-        const nextSettings = s ? { ...DEFAULT_SETTINGS, ...s } : DEFAULT_SETTINGS;
+
+        // ✅ 예전 설정 객체에 다른 키가 있어도 무시하고 현재 구조로만 merge
+        const mergedSettings: AppSettings = {
+          ...DEFAULT_SETTINGS,
+          ...(sRaw && typeof sRaw === "object" ? sRaw : {}),
+        };
+        // 안전 클램프
+        mergedSettings.fontSize = clamp(Number(mergedSettings.fontSize || DEFAULT_SETTINGS.fontSize), 14, 22);
+        mergedSettings.lineHeight = clamp(Number(mergedSettings.lineHeight || DEFAULT_SETTINGS.lineHeight), 1.4, 2.2);
+        mergedSettings.containerMaxWidth = clamp(Number(mergedSettings.containerMaxWidth || DEFAULT_SETTINGS.containerMaxWidth), 680, 980);
+        mergedSettings.theme = mergedSettings.theme === "dark" ? "dark" : "light";
 
         setHistory(nextHistory);
         setFolders(nextFolders);
-        setSettings(nextSettings);
+        setSettings(mergedSettings);
 
         setCurrentHistoryId(nextHistory[0]?.id ?? null);
       } catch (e: any) {
@@ -340,6 +342,12 @@ export default function Page() {
 
   async function updateSettings(patch: Partial<AppSettings>) {
     const next: AppSettings = { ...settings, ...patch };
+    // 안전 클램프
+    next.fontSize = clamp(Number(next.fontSize || DEFAULT_SETTINGS.fontSize), 14, 22);
+    next.lineHeight = clamp(Number(next.lineHeight || DEFAULT_SETTINGS.lineHeight), 1.4, 2.2);
+    next.containerMaxWidth = clamp(Number(next.containerMaxWidth || DEFAULT_SETTINGS.containerMaxWidth), 680, 980);
+    next.theme = next.theme === "dark" ? "dark" : "light";
+
     setSettings(next);
     try {
       await dbSaveSettings(next);
@@ -611,8 +619,9 @@ export default function Page() {
     disableSelectMode();
   }
 
+  // ✅ 헤더 기본값은 고정: URL 번역은 ON, 수동 번역은 OFF
   function inferHeaderForItem(it: HistoryItem) {
-    return it.url ? settings.showHeaderForUrl : settings.showHeaderForManual;
+    return !!it.url;
   }
 
   function loadHistoryItem(it: HistoryItem) {
@@ -641,7 +650,6 @@ export default function Page() {
     const next = history.map((h) => (h.id === id ? { ...h, showHeader: nextValue } : h));
     await persistHistory(next);
 
-    // 현재 화면에 로드된 항목이면 즉시 반영
     if (currentHistoryId === id) {
       setShowHeader(nextValue);
     }
@@ -752,7 +760,8 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      const nextShowHeader = mode === "url" ? settings.showHeaderForUrl : settings.showHeaderForManual;
+      // ✅ 기본값 고정: URL 번역만 헤더 표시
+      const nextShowHeader = mode === "url";
       setShowHeader(nextShowHeader);
 
       await autoSaveToHistory({
@@ -843,20 +852,16 @@ export default function Page() {
   const overlay = "rgba(0,0,0,0.35)";
 
   /* =========================
-     UI
+     Settings Preview (미리보기)
   ========================= */
+  const previewTitle = headerPreview.title || "패러디소설";
+  const previewEp = headerPreview.epLine || "제 1화";
+  const previewBody =
+    (resultBody || "").trim() ||
+    "미리보기 텍스트입니다.\n\n여기에서 글자 크기, 줄 간격, 화면 폭이 어떻게 보이는지 즉시 확인할 수 있어요.\n\n(실제 번역 결과가 있으면 그걸 먼저 보여줘요.)";
+
   return (
-    <main
-      style={{
-        maxWidth: settings.containerMaxWidth,
-        margin: "0 auto",
-        padding: 24,
-        paddingBottom: 86,
-        background: bg,
-        color: fg,
-        minHeight: "100vh",
-      }}
-    >
+    <main style={{ maxWidth: settings.containerMaxWidth, margin: "0 auto", padding: 24, paddingBottom: 86, background: bg, color: fg, minHeight: "100vh" }}>
       {/* 상단바 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
         <div>
@@ -865,7 +870,6 @@ export default function Page() {
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {/* 히스토리: ☰ 아이콘만 */}
           <button
             onClick={() => {
               setHistoryOpen(true);
@@ -873,37 +877,16 @@ export default function Page() {
               setMenuOpen(false);
               setMenuAnchor(null);
             }}
-            style={{
-              width: 44,
-              height: 40,
-              borderRadius: 12,
-              border,
-              cursor: "pointer",
-              fontWeight: 900,
-              background: cardBg,
-              fontSize: 18,
-              color: fg,
-            }}
+            style={{ width: 44, height: 40, borderRadius: 12, border, cursor: "pointer", fontWeight: 900, background: cardBg, fontSize: 18, color: fg }}
             title="히스토리"
             aria-label="히스토리"
           >
             ☰
           </button>
 
-          {/* 설정 아이콘 */}
           <button
             onClick={() => setSettingsOpen(true)}
-            style={{
-              width: 44,
-              height: 40,
-              borderRadius: 12,
-              border,
-              cursor: "pointer",
-              fontWeight: 900,
-              background: cardBg,
-              fontSize: 18,
-              color: fg,
-            }}
+            style={{ width: 44, height: 40, borderRadius: 12, border, cursor: "pointer", fontWeight: 900, background: cardBg, fontSize: 18, color: fg }}
             title="설정"
             aria-label="설정"
           >
@@ -918,14 +901,7 @@ export default function Page() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="URL 붙여넣기"
-          style={{
-            flex: 1,
-            padding: 10,
-            borderRadius: 10,
-            border,
-            background: cardBg,
-            color: fg,
-          }}
+          style={{ flex: 1, padding: 10, borderRadius: 10, border, background: cardBg, color: fg }}
         />
         <button
           onClick={fetchFromUrl}
@@ -955,16 +931,7 @@ export default function Page() {
             value={source}
             onChange={(e) => setSource(e.target.value)}
             placeholder="원문을 직접 붙여넣기"
-            style={{
-              width: "100%",
-              minHeight: 160,
-              padding: 12,
-              borderRadius: 10,
-              border,
-              whiteSpace: "pre-wrap",
-              background: cardBg,
-              color: fg,
-            }}
+            style={{ width: "100%", minHeight: 160, padding: 12, borderRadius: 10, border, whiteSpace: "pre-wrap", background: cardBg, color: fg }}
           />
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
@@ -987,19 +954,7 @@ export default function Page() {
             </button>
 
             {isLoading && (
-              <button
-                onClick={handleCancel}
-                style={{
-                  height: 40,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: cardBg,
-                  color: fg,
-                }}
-              >
+              <button onClick={handleCancel} style={{ height: 40, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
                 취소
               </button>
             )}
@@ -1054,45 +1009,46 @@ export default function Page() {
         <div
           role="dialog"
           aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: overlay,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 10002,
-          }}
+          style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10002 }}
           onClick={() => setSettingsOpen(false)}
         >
           <div
-            style={{
-              width: "min(720px, 100%)",
-              maxHeight: "80vh",
-              overflow: "auto",
-              background: cardBg,
-              color: fg,
-              borderRadius: 14,
-              border,
-              padding: 14,
-            }}
+            style={{ width: "min(820px, 100%)", maxHeight: "85vh", overflow: "auto", background: cardBg, color: fg, borderRadius: 14, border, padding: 14 }}
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
               <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
-              <button
-                onClick={() => setSettingsOpen(false)}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
-              >
+              <button onClick={() => setSettingsOpen(false)} style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
                 닫기
               </button>
             </div>
 
-            {/* Theme */}
-            <div style={{ marginTop: 14, border: subtleBorder, borderRadius: 12, padding: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>테마</div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {/* ✅ 미리보기 (항상 보이게) */}
+            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>미리보기</div>
+              <div
+                style={{
+                  border,
+                  borderRadius: 14,
+                  padding: 14,
+                  background: theme === "dark" ? "#0f1118" : "#fff",
+                  whiteSpace: "pre-wrap",
+                  lineHeight: settings.lineHeight,
+                }}
+              >
+                <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 6 }}>{previewTitle}</div>
+                <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 16 }}>{previewEp}</div>
+                <div style={{ fontSize: settings.fontSize }}>{previewBody}</div>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10, lineHeight: 1.5 }}>
+                ※ 여기서 보이는 변화는 즉시 반영돼. (테마/글자크기/줄간격/폭)
+              </div>
+            </div>
+
+            {/* ✅ 기본 접힘 섹션들 */}
+            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>테마</summary>
+              <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                 <button
                   onClick={() => updateSettings({ theme: "light" })}
                   style={{
@@ -1124,20 +1080,20 @@ export default function Page() {
                   다크
                 </button>
               </div>
-            </div>
+            </details>
 
-            {/* Viewer */}
-            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>번역 결과 보기</div>
+            {/* ✅ 섹션명 변경: 번역 결과 보기 → 서식 편집 */}
+            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
 
-              <div style={{ marginTop: 10 }}>
+              <div style={{ marginTop: 12 }}>
                 <div style={{ fontWeight: 800, marginBottom: 6 }}>글자 크기: {settings.fontSize}px</div>
                 <input
                   type="range"
                   min={14}
                   max={22}
                   value={settings.fontSize}
-                  onChange={(e) => updateSettings({ fontSize: clamp(Number(e.target.value), 14, 22) })}
+                  onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })}
                   style={{ width: "100%" }}
                 />
               </div>
@@ -1149,7 +1105,7 @@ export default function Page() {
                   min={14}
                   max={22}
                   value={Math.round(settings.lineHeight * 10)}
-                  onChange={(e) => updateSettings({ lineHeight: clamp(Number(e.target.value) / 10, 1.4, 2.2) })}
+                  onChange={(e) => updateSettings({ lineHeight: Number(e.target.value) / 10 })}
                   style={{ width: "100%" }}
                 />
               </div>
@@ -1162,73 +1118,28 @@ export default function Page() {
                   max={980}
                   step={10}
                   value={settings.containerMaxWidth}
-                  onChange={(e) => updateSettings({ containerMaxWidth: clamp(Number(e.target.value), 680, 980) })}
+                  onChange={(e) => updateSettings({ containerMaxWidth: Number(e.target.value) })}
                   style={{ width: "100%" }}
                 />
               </div>
-            </div>
+            </details>
 
-            {/* Header rules */}
-            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>헤더 표시 규칙</div>
-
-              <label style={{ display: "flex", gap: 10, alignItems: "center", cursor: "pointer", userSelect: "none" }}>
-                <input
-                  type="checkbox"
-                  checked={settings.showHeaderForUrl}
-                  onChange={(e) => updateSettings({ showHeaderForUrl: e.target.checked })}
-                  style={{ width: 18, height: 18 }}
-                />
-                <span style={{ fontWeight: 800 }}>URL 번역 결과에 큰제목/회차 표시</span>
-              </label>
-
-              <div style={{ height: 10 }} />
-
-              <label style={{ display: "flex", gap: 10, alignItems: "center", cursor: "pointer", userSelect: "none" }}>
-                <input
-                  type="checkbox"
-                  checked={settings.showHeaderForManual}
-                  onChange={(e) => updateSettings({ showHeaderForManual: e.target.checked })}
-                  style={{ width: 18, height: 18 }}
-                />
-                <span style={{ fontWeight: 800 }}>수동 번역 결과에 큰제목/회차 표시</span>
-              </label>
-
-              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.5 }}>
-                ※ 히스토리 항목별로는 목록의 🏷 버튼으로 개별 토글 가능.
+            {/* ✅ 앞으로 기능들 추가될 자리: 기본 접힘 */}
+            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
+              <summary style={{ cursor: "pointer", fontWeight: 900 }}>추가 기능 (준비중)</summary>
+              <div style={{ marginTop: 12, fontSize: 13, opacity: 0.75, lineHeight: 1.6 }}>
+                여기에 앞으로 옵션들이 계속 들어갈 거야.
+                <br />
+                기본은 접혀 있고, 눌러서 펼쳐서 편집하는 구조로 유지할게.
               </div>
-            </div>
+            </details>
 
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 14 }}>
-              <button
-                onClick={resetSettings}
-                style={{
-                  height: 38,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: cardBg,
-                  color: fg,
-                }}
-              >
+              <button onClick={resetSettings} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
                 설정 초기화
               </button>
 
-              <button
-                onClick={() => setSettingsOpen(false)}
-                style={{
-                  height: 38,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: "#111",
-                  color: "#fff",
-                }}
-              >
+              <button onClick={() => setSettingsOpen(false)} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: "#111", color: "#fff" }}>
                 닫기
               </button>
             </div>
@@ -1243,16 +1154,7 @@ export default function Page() {
         <div
           role="dialog"
           aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: overlay,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 9999,
-          }}
+          style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 9999 }}
           onClick={() => {
             setHistoryOpen(false);
             setMenuOpen(false);
@@ -1287,16 +1189,7 @@ export default function Page() {
                   {selectedFolderId !== null && (
                     <button
                       onClick={renameCurrentFolder}
-                      style={{
-                        width: 32,
-                        height: 28,
-                        borderRadius: 10,
-                        border,
-                        background: cardBg,
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        color: fg,
-                      }}
+                      style={{ width: 32, height: 28, borderRadius: 10, border, background: cardBg, cursor: "pointer", fontWeight: 900, color: fg }}
                       title="폴더 이름 수정"
                     >
                       ✏️
@@ -1376,16 +1269,7 @@ export default function Page() {
                         setHistoryPage(1);
                         disableSelectMode();
                       }}
-                      style={{
-                        height: 34,
-                        padding: "0 12px",
-                        borderRadius: 999,
-                        border,
-                        background: cardBg,
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        color: fg,
-                      }}
+                      style={{ height: 34, padding: "0 12px", borderRadius: 999, border, background: cardBg, cursor: "pointer", fontWeight: 900, color: fg }}
                     >
                       📁 {f.name}
                     </button>
@@ -1402,7 +1286,6 @@ export default function Page() {
                   {pagedHistory.map((it) => {
                     const label = `${it.seriesTitle} · ${it.episodeNo}화`;
                     const checked = !!selectedIds[it.id];
-
                     const effectiveHeader = typeof it.showHeader === "boolean" ? it.showHeader : inferHeaderForItem(it);
 
                     return (
@@ -1418,15 +1301,7 @@ export default function Page() {
                           alignItems: "center",
                         }}
                       >
-                        {selectMode && (
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => toggleSelect(it.id)}
-                            style={{ width: 18, height: 18, cursor: "pointer" }}
-                            aria-label="항목 선택"
-                          />
-                        )}
+                        {selectMode && <input type="checkbox" checked={checked} onChange={() => toggleSelect(it.id)} style={{ width: 18, height: 18, cursor: "pointer" }} aria-label="항목 선택" />}
 
                         <button
                           onClick={() => {
@@ -1436,21 +1311,12 @@ export default function Page() {
                             }
                             loadHistoryItem(it);
                           }}
-                          style={{
-                            flex: 1,
-                            border: "none",
-                            background: "transparent",
-                            cursor: "pointer",
-                            textAlign: "left",
-                            color: fg,
-                          }}
+                          style={{ flex: 1, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", color: fg }}
                           title={selectMode ? "선택/해제" : "불러오기"}
                         >
                           <div style={{ fontWeight: 900, display: "flex", gap: 8, alignItems: "center" }}>
                             <span>{label}</span>
-                            <span style={{ fontSize: 12, opacity: 0.7 }}>
-                              {effectiveHeader ? "· 헤더 ON" : "· 헤더 OFF"}
-                            </span>
+                            <span style={{ fontSize: 12, opacity: 0.7 }}>{effectiveHeader ? "· 헤더 ON" : "· 헤더 OFF"}</span>
                           </div>
                           <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
                             {formatDate(it.createdAt)}
@@ -1458,20 +1324,9 @@ export default function Page() {
                           </div>
                         </button>
 
-                        {/* ✅ 항목별 헤더 토글 */}
                         <button
                           onClick={() => toggleHeaderForHistoryItem(it.id)}
-                          style={{
-                            width: 46,
-                            height: 34,
-                            borderRadius: 10,
-                            border,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            background: cardBg,
-                            color: fg,
-                            opacity: 1,
-                          }}
+                          style={{ width: 46, height: 34, borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
                           title="이 항목의 헤더 표시 토글"
                           aria-label="헤더 표시 토글"
                         >
@@ -1480,16 +1335,7 @@ export default function Page() {
 
                         <button
                           onClick={() => handleCopy(it.translatedText)}
-                          style={{
-                            width: 46,
-                            height: 34,
-                            borderRadius: 10,
-                            border,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            background: cardBg,
-                            color: fg,
-                          }}
+                          style={{ width: 46, height: 34, borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
                           title="번역본 복사"
                         >
                           📋
@@ -1499,7 +1345,6 @@ export default function Page() {
                   })}
                 </div>
 
-                {/* 페이지네이션 */}
                 {totalPages > 1 && (
                   <div
                     style={{
@@ -1520,17 +1365,7 @@ export default function Page() {
                         <button
                           key={p}
                           onClick={() => setHistoryPage(p)}
-                          style={{
-                            minWidth: 34,
-                            height: 32,
-                            padding: "0 10px",
-                            borderRadius: 10,
-                            border,
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            background: active ? "#111" : cardBg,
-                            color: active ? "#fff" : fg,
-                          }}
+                          style={{ minWidth: 34, height: 32, padding: "0 10px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: active ? "#111" : cardBg, color: active ? "#fff" : fg }}
                         >
                           {p}
                         </button>
@@ -1541,25 +1376,13 @@ export default function Page() {
               </>
             )}
 
-            {/* 하단 오른쪽: 선택모드 이동/삭제 + 메뉴(➕) */}
             <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
               {selectMode && (
                 <>
                   <button
                     onClick={openMovePicker}
                     disabled={selectedCount === 0}
-                    style={{
-                      height: 40,
-                      padding: "0 12px",
-                      borderRadius: 14,
-                      border,
-                      background: cardBg,
-                      fontWeight: 900,
-                      cursor: selectedCount > 0 ? "pointer" : "not-allowed",
-                      opacity: selectedCount > 0 ? 1 : 0.5,
-                      fontSize: 13,
-                      color: fg,
-                    }}
+                    style={{ height: 40, padding: "0 12px", borderRadius: 14, border, background: cardBg, fontWeight: 900, cursor: selectedCount > 0 ? "pointer" : "not-allowed", opacity: selectedCount > 0 ? 1 : 0.5, fontSize: 13, color: fg }}
                     title="이동"
                   >
                     이동
@@ -1570,18 +1393,7 @@ export default function Page() {
                   <button
                     onClick={deleteSelectedItems}
                     disabled={selectedCount === 0}
-                    style={{
-                      height: 40,
-                      padding: "0 12px",
-                      borderRadius: 14,
-                      border,
-                      background: cardBg,
-                      fontWeight: 900,
-                      cursor: selectedCount > 0 ? "pointer" : "not-allowed",
-                      opacity: selectedCount > 0 ? 1 : 0.5,
-                      fontSize: 13,
-                      color: fg,
-                    }}
+                    style={{ height: 40, padding: "0 12px", borderRadius: 14, border, background: cardBg, fontWeight: 900, cursor: selectedCount > 0 ? "pointer" : "not-allowed", opacity: selectedCount > 0 ? 1 : 0.5, fontSize: 13, color: fg }}
                     title="삭제"
                   >
                     삭제
@@ -1626,18 +1438,7 @@ export default function Page() {
           }}
         >
           <div
-            style={{
-              position: "fixed",
-              right: menuAnchor.right,
-              bottom: menuAnchor.bottom,
-              width: 220,
-              background: cardBg,
-              color: fg,
-              border,
-              borderRadius: 14,
-              boxShadow: "0 18px 40px rgba(0,0,0,0.14)",
-              padding: 8,
-            }}
+            style={{ position: "fixed", right: menuAnchor.right, bottom: menuAnchor.bottom, width: 220, background: cardBg, color: fg, border, borderRadius: 14, boxShadow: "0 18px 40px rgba(0,0,0,0.14)", padding: 8 }}
             onClick={(e) => e.stopPropagation()}
           >
             <MenuButton
@@ -1676,34 +1477,8 @@ export default function Page() {
 
       {/* Move Picker Modal */}
       {movePickerOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: overlay,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 16,
-            zIndex: 10000,
-          }}
-          onClick={() => setMovePickerOpen(false)}
-        >
-          <div
-            style={{
-              width: "min(720px, 100%)",
-              maxHeight: "80vh",
-              overflow: "auto",
-              background: cardBg,
-              color: fg,
-              borderRadius: 14,
-              border,
-              padding: 14,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div role="dialog" aria-modal="true" style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10000 }} onClick={() => setMovePickerOpen(false)}>
+          <div style={{ width: "min(720px, 100%)", maxHeight: "80vh", overflow: "auto", background: cardBg, color: fg, borderRadius: 14, border, padding: 14 }} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
@@ -1712,10 +1487,7 @@ export default function Page() {
                 </div>
               </div>
 
-              <button
-                onClick={() => setMovePickerOpen(false)}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
-              >
+              <button onClick={() => setMovePickerOpen(false)} style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
                 닫기
               </button>
             </div>
@@ -1742,8 +1514,6 @@ export default function Page() {
 
               {buildFolderTree(null, 0).map(({ f, depth }) => {
                 const active = moveTargetFolderId === f.id;
-
-                // ✅ depth에 따라 ↳ 반복 표시
                 const marker = depth > 0 ? "↳ ".repeat(depth) : "";
                 return (
                   <button
@@ -1774,36 +1544,14 @@ export default function Page() {
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
-              <button
-                onClick={() => setMovePickerOpen(false)}
-                style={{
-                  height: 38,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: cardBg,
-                  color: fg,
-                }}
-              >
+              <button onClick={() => setMovePickerOpen(false)} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
                 취소
               </button>
 
               <button
                 onClick={() => moveSelectedToFolder(moveTargetFolderId)}
                 disabled={selectedCount === 0}
-                style={{
-                  height: 38,
-                  padding: "0 14px",
-                  borderRadius: 10,
-                  border,
-                  cursor: selectedCount > 0 ? "pointer" : "not-allowed",
-                  fontWeight: 900,
-                  background: "#111",
-                  color: "#fff",
-                  opacity: selectedCount > 0 ? 1 : 0.5,
-                }}
+                style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: selectedCount > 0 ? "pointer" : "not-allowed", fontWeight: 900, background: "#111", color: "#fff", opacity: selectedCount > 0 ? 1 : 0.5 }}
               >
                 이동 확정
               </button>
@@ -1813,70 +1561,17 @@ export default function Page() {
       )}
 
       {/* Bottom Nav */}
-      <div
-        style={{
-          position: "fixed",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: theme === "dark" ? "rgba(18,20,27,0.96)" : "rgba(255,255,255,0.96)",
-          borderTop: theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd",
-          padding: "10px 12px",
-          zIndex: 9998,
-        }}
-      >
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, background: theme === "dark" ? "rgba(18,20,27,0.96)" : "rgba(255,255,255,0.96)", borderTop: theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd", padding: "10px 12px", zIndex: 9998 }}>
         <div style={{ maxWidth: settings.containerMaxWidth, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-          <button
-            onClick={goPrev}
-            disabled={!canPrev}
-            style={{
-              height: 40,
-              padding: "0 14px",
-              borderRadius: 12,
-              border,
-              background: cardBg,
-              fontWeight: 900,
-              cursor: canPrev ? "pointer" : "not-allowed",
-              opacity: canPrev ? 1 : 0.5,
-              color: fg,
-            }}
-          >
+          <button onClick={goPrev} disabled={!canPrev} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: canPrev ? "pointer" : "not-allowed", opacity: canPrev ? 1 : 0.5, color: fg }}>
             ◀ 이전
           </button>
 
-          <button
-            onClick={() => handleCopy(resultBody || "")}
-            disabled={!resultBody.trim()}
-            style={{
-              height: 40,
-              padding: "0 14px",
-              borderRadius: 12,
-              border,
-              background: cardBg,
-              fontWeight: 900,
-              cursor: resultBody.trim() ? "pointer" : "not-allowed",
-              opacity: resultBody.trim() ? 1 : 0.5,
-              color: fg,
-            }}
-          >
+          <button onClick={() => handleCopy(resultBody || "")} disabled={!resultBody.trim()} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: resultBody.trim() ? "pointer" : "not-allowed", opacity: resultBody.trim() ? 1 : 0.5, color: fg }}>
             📋 복사
           </button>
 
-          <button
-            onClick={goNext}
-            disabled={!canNext}
-            style={{
-              height: 40,
-              padding: "0 14px",
-              borderRadius: 12,
-              border,
-              background: cardBg,
-              fontWeight: 900,
-              cursor: canNext ? "pointer" : "not-allowed",
-              opacity: canNext ? 1 : 0.5,
-              color: fg,
-            }}
-          >
+          <button onClick={goNext} disabled={!canNext} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: canNext ? "pointer" : "not-allowed", opacity: canNext ? 1 : 0.5, color: fg }}>
             다음 ▶
           </button>
         </div>
