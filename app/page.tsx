@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 /* =========================
    자동 분할 (긴 글 대응)
@@ -25,9 +25,7 @@ function chunkText(input: string, maxChars = 4500): string[] {
 
     if (p.length > maxChars) {
       push();
-      for (let i = 0; i < p.length; i += maxChars) {
-        chunks.push(p.slice(i, i + maxChars));
-      }
+      for (let i = 0; i < p.length; i += maxChars) chunks.push(p.slice(i, i + maxChars));
       continue;
     }
 
@@ -51,11 +49,11 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string;
+  translatedText: string; // 본문만 저장
   url?: string;
 
   folderId?: string | null;
-  showHeader?: boolean; // 히스토리 항목별로 ON/OFF 저장
+  showHeader?: boolean; // url 번역이면 true, 수동은 false
 };
 
 type HistoryFolder = {
@@ -65,25 +63,44 @@ type HistoryFolder = {
   parentId: string | null;
 };
 
-type AppSettings = {
-  // Viewer
-  fontSize: number; // px
-  lineHeight: number; // CSS number
-  containerMaxWidth: number; // px
+const STORAGE_KEY = "parody_translator_history_v3";
+const FOLDERS_KEY = "parody_translator_history_folders_v2";
 
-  // Theme
-  theme: "light" | "dark";
-};
-
-const DEFAULT_SETTINGS: AppSettings = {
-  fontSize: 16,
-  lineHeight: 1.7,
-  containerMaxWidth: 860,
-  theme: "light",
-};
+/** ✅ 설정 저장 키 */
+const SETTINGS_KEY = "parody_translator_settings_v1";
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function loadHistory(): HistoryItem[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x) => x && typeof x === "object" && typeof x.id === "string");
+  } catch {
+    return [];
+  }
+}
+function saveHistory(items: HistoryItem[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+}
+
+function loadFolders(): HistoryFolder[] {
+  try {
+    const raw = localStorage.getItem(FOLDERS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x) => x && typeof x.id === "string" && typeof x.name === "string");
+  } catch {
+    return [];
+  }
+}
+function saveFolders(folders: HistoryFolder[]) {
+  localStorage.setItem(FOLDERS_KEY, JSON.stringify(folders));
 }
 
 function formatDate(ts: number) {
@@ -118,89 +135,6 @@ async function safeReadJson(res: Response) {
 }
 
 /* =========================
-   IndexedDB (영구 저장)
-========================= */
-const DB_NAME = "parody_translator_db";
-const DB_VERSION = 2;
-const STORE_HISTORY = "history";
-const STORE_FOLDERS = "folders";
-const STORE_SETTINGS = "settings";
-const SETTINGS_KEY = "app_settings_singleton";
-
-function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-
-    req.onupgradeneeded = () => {
-      const db = req.result;
-
-      if (!db.objectStoreNames.contains(STORE_HISTORY)) {
-        db.createObjectStore(STORE_HISTORY, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(STORE_FOLDERS)) {
-        db.createObjectStore(STORE_FOLDERS, { keyPath: "id" });
-      }
-      if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
-        db.createObjectStore(STORE_SETTINGS, { keyPath: "key" });
-      }
-    };
-
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbGetAll<T>(storeName: string): Promise<T[]> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, "readonly");
-    const store = tx.objectStore(storeName);
-    const req = store.getAll();
-    req.onsuccess = () => resolve((req.result || []) as T[]);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbReplaceAll<T extends { id: string }>(storeName: string, items: T[]): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, "readwrite");
-    const store = tx.objectStore(storeName);
-
-    const clearReq = store.clear();
-    clearReq.onerror = () => reject(clearReq.error);
-
-    clearReq.onsuccess = () => {
-      for (const it of items) store.put(it);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    };
-  });
-}
-
-async function dbGetSettings(): Promise<any | null> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_SETTINGS, "readonly");
-    const store = tx.objectStore(STORE_SETTINGS);
-    const req = store.get(SETTINGS_KEY);
-    req.onsuccess = () => resolve(req.result?.value ?? null);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbSaveSettings(value: AppSettings): Promise<void> {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_SETTINGS, "readwrite");
-    const store = tx.objectStore(STORE_SETTINGS);
-    store.put({ key: SETTINGS_KEY, value });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-/* =========================
    작은 메뉴 버튼
 ========================= */
 function MenuButton(props: { label: string; onClick: () => void; disabled?: boolean }) {
@@ -226,16 +160,255 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
   );
 }
 
+/* =========================
+   ✅ 설정(배경/서식) 모델
+========================= */
+type ThemePreset = "vintage" | "minimalLight" | "inkDark" | "nightReading";
+type BackgroundType = "paper" | "solid" | "gradient" | "image";
+
+type AppSettings = {
+  preset: ThemePreset;
+  backgroundType: BackgroundType;
+
+  // 배경 기본
+  baseColor: string; // solid/paper base
+  gradientFrom: string;
+  gradientTo: string;
+  imageUrl: string;
+
+  // 종이 느낌/가독성
+  paperGrain: number; // 0..100
+  vignette: number; // 0..100
+  warmth: number; // 0..100
+  overlay: number; // 0..100 (가독성 오버레이)
+
+  // 서식(번역 결과 보기)
+  fontSize: number; // px
+  lineHeight: number; // 1.4~2.2
+};
+
+const DEFAULT_SETTINGS: AppSettings = {
+  preset: "vintage",
+  backgroundType: "paper",
+
+  baseColor: "#F2E7D3",
+  gradientFrom: "#F4E9D6",
+  gradientTo: "#EAD9B8",
+  imageUrl: "",
+
+  paperGrain: 18,
+  vignette: 22,
+  warmth: 18,
+  overlay: 10,
+
+  fontSize: 16,
+  lineHeight: 1.75,
+};
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function applyPreset(p: ThemePreset): Partial<AppSettings> {
+  switch (p) {
+    case "vintage":
+      return {
+        preset: "vintage",
+        backgroundType: "paper",
+        baseColor: "#F2E7D3",
+        gradientFrom: "#F4E9D6",
+        gradientTo: "#EAD9B8",
+        imageUrl: "",
+        paperGrain: 18,
+        vignette: 22,
+        warmth: 18,
+        overlay: 10,
+        fontSize: 16,
+        lineHeight: 1.75,
+      };
+    case "minimalLight":
+      return {
+        preset: "minimalLight",
+        backgroundType: "solid",
+        baseColor: "#F7F7F7",
+        paperGrain: 0,
+        vignette: 0,
+        warmth: 0,
+        overlay: 0,
+        fontSize: 16,
+        lineHeight: 1.75,
+      };
+    case "inkDark":
+      return {
+        preset: "inkDark",
+        backgroundType: "solid",
+        baseColor: "#0E0F12",
+        paperGrain: 0,
+        vignette: 0,
+        warmth: 0,
+        overlay: 16,
+        fontSize: 16,
+        lineHeight: 1.8,
+      };
+    case "nightReading":
+      return {
+        preset: "nightReading",
+        backgroundType: "solid",
+        baseColor: "#121316",
+        paperGrain: 0,
+        vignette: 0,
+        warmth: 0,
+        overlay: 18,
+        fontSize: 17,
+        lineHeight: 1.85,
+      };
+    default:
+      return {};
+  }
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return DEFAULT_SETTINGS;
+
+    const s: AppSettings = {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+    };
+
+    // 방어적 클램프
+    s.paperGrain = clamp(Number(s.paperGrain ?? DEFAULT_SETTINGS.paperGrain), 0, 100);
+    s.vignette = clamp(Number(s.vignette ?? DEFAULT_SETTINGS.vignette), 0, 100);
+    s.warmth = clamp(Number(s.warmth ?? DEFAULT_SETTINGS.warmth), 0, 100);
+    s.overlay = clamp(Number(s.overlay ?? DEFAULT_SETTINGS.overlay), 0, 100);
+    s.fontSize = clamp(Number(s.fontSize ?? DEFAULT_SETTINGS.fontSize), 12, 28);
+    s.lineHeight = clamp(Number(s.lineHeight ?? DEFAULT_SETTINGS.lineHeight), 1.3, 2.4);
+    return s;
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
+
+function saveSettings(s: AppSettings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+}
+
+/* =========================
+   ✅ 배경 스타일 계산
+========================= */
+function withWarmth(colorHex: string, warmth: number) {
+  // 아주 단순한 "따뜻함" 가산(완전 정확한 색공간 변환은 아님)
+  // warmth 0..100 => red +, blue -
+  const w = clamp(warmth, 0, 100) / 100;
+  const hex = colorHex.replace("#", "").trim();
+  if (hex.length !== 6) return colorHex;
+
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+
+  const rr = clamp(Math.round(r + 25 * w), 0, 255);
+  const gg = clamp(Math.round(g + 10 * w), 0, 255);
+  const bb = clamp(Math.round(b - 25 * w), 0, 255);
+
+  const toHex = (x: number) => x.toString(16).padStart(2, "0");
+  return `#${toHex(rr)}${toHex(gg)}${toHex(bb)}`;
+}
+
+function buildBackgroundCss(s: AppSettings) {
+  const base = withWarmth(s.baseColor, s.warmth);
+
+  if (s.backgroundType === "solid") {
+    return { backgroundColor: base, backgroundImage: "none" as const };
+  }
+
+  if (s.backgroundType === "gradient") {
+    const from = withWarmth(s.gradientFrom, s.warmth);
+    const to = withWarmth(s.gradientTo, s.warmth);
+    return {
+      backgroundColor: from,
+      backgroundImage: `linear-gradient(135deg, ${from}, ${to})`,
+    };
+  }
+
+  if (s.backgroundType === "image") {
+    // URL은 사용자가 넣는 그대로 (깨지면 그냥 배경색으로)
+    return {
+      backgroundColor: base,
+      backgroundImage: s.imageUrl.trim()
+        ? `linear-gradient(rgba(255,255,255,${clamp(s.overlay, 0, 100) / 300}), rgba(255,255,255,${
+            clamp(s.overlay, 0, 100) / 300
+          })), url("${s.imageUrl.trim()}")`
+        : "none",
+      backgroundSize: "cover",
+      backgroundPosition: "center",
+      backgroundRepeat: "no-repeat",
+    };
+  }
+
+  // paper
+  // paper grain: 아주 미세한 라인 패턴 2겹 + 옅은 그라데이션
+  const grain = clamp(s.paperGrain, 0, 100) / 100;
+  const overlay = clamp(s.overlay, 0, 100) / 100;
+
+  const from = withWarmth(s.gradientFrom, s.warmth);
+  const to = withWarmth(s.gradientTo, s.warmth);
+
+  return {
+    backgroundColor: base,
+    backgroundImage: [
+      `linear-gradient(135deg, ${from}, ${to})`,
+      `repeating-linear-gradient(0deg, rgba(0,0,0,${0.03 * grain}), rgba(0,0,0,${0.03 * grain}) 1px, rgba(0,0,0,0) 2px, rgba(0,0,0,0) 6px)`,
+      `repeating-linear-gradient(90deg, rgba(0,0,0,${0.02 * grain}), rgba(0,0,0,${0.02 * grain}) 1px, rgba(0,0,0,0) 2px, rgba(0,0,0,0) 7px)`,
+      `linear-gradient(rgba(255,255,255,${0.2 + overlay * 0.25}), rgba(255,255,255,${0.2 + overlay * 0.25}))`,
+    ].join(", "),
+    backgroundBlendMode: "multiply, multiply, multiply, normal",
+  };
+}
+
+function buildVignetteStyle(vignette: number) {
+  const v = clamp(vignette, 0, 100) / 100;
+  // inset shadow로 비네팅 대체
+  return {
+    boxShadow: v
+      ? `inset 0 0 ${Math.round(240 * v)}px rgba(0,0,0,${0.30 * v})`
+      : "none",
+  } as React.CSSProperties;
+}
+
+/* =========================
+   Page
+========================= */
 export default function Page() {
   /* =========================
-     Settings
+     ✅ Settings
   ========================= */
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<AppSettings>(() => {
+    if (typeof window === "undefined") return DEFAULT_SETTINGS;
+    return loadSettings();
+  });
+
+  function updateSettings(patch: Partial<AppSettings>) {
+    setSettings((prev) => {
+      const next: AppSettings = { ...prev, ...patch };
+      // 클램프
+      next.paperGrain = clamp(Number(next.paperGrain), 0, 100);
+      next.vignette = clamp(Number(next.vignette), 0, 100);
+      next.warmth = clamp(Number(next.warmth), 0, 100);
+      next.overlay = clamp(Number(next.overlay), 0, 100);
+      next.fontSize = clamp(Number(next.fontSize), 12, 28);
+      next.lineHeight = clamp(Number(next.lineHeight), 1.3, 2.4);
+
+      try {
+        saveSettings(next);
+      } catch {}
+      return next;
+    });
+  }
 
   /* =========================
      URL 중심
@@ -272,10 +445,19 @@ export default function Page() {
   ========================= */
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [folders, setFolders] = useState<HistoryFolder[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    return loadHistory().sort((a, b) => b.createdAt - a.createdAt);
+  });
+
+  const [folders, setFolders] = useState<HistoryFolder[]>(() => {
+    if (typeof window === "undefined") return [];
+    return loadFolders().sort((a, b) => a.createdAt - b.createdAt);
+  });
 
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+
+  // 전체(null) 또는 현재 폴더
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
   // + 메뉴 팝업
@@ -293,73 +475,6 @@ export default function Page() {
   // 페이지네이션
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
-
-  /* =========================
-     최초 로드: IndexedDB → state
-  ========================= */
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      try {
-        const [h, f, sRaw] = await Promise.all([
-          dbGetAll<HistoryItem>(STORE_HISTORY),
-          dbGetAll<HistoryFolder>(STORE_FOLDERS),
-          dbGetSettings(),
-        ]);
-
-        if (!alive) return;
-
-        const nextHistory = (h || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-        const nextFolders = (f || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-
-        // ✅ 예전 설정 객체에 다른 키가 있어도 무시하고 현재 구조로만 merge
-        const mergedSettings: AppSettings = {
-          ...DEFAULT_SETTINGS,
-          ...(sRaw && typeof sRaw === "object" ? sRaw : {}),
-        };
-        // 안전 클램프
-        mergedSettings.fontSize = clamp(Number(mergedSettings.fontSize || DEFAULT_SETTINGS.fontSize), 14, 22);
-        mergedSettings.lineHeight = clamp(Number(mergedSettings.lineHeight || DEFAULT_SETTINGS.lineHeight), 1.4, 2.2);
-        mergedSettings.containerMaxWidth = clamp(Number(mergedSettings.containerMaxWidth || DEFAULT_SETTINGS.containerMaxWidth), 680, 980);
-        mergedSettings.theme = mergedSettings.theme === "dark" ? "dark" : "light";
-
-        setHistory(nextHistory);
-        setFolders(nextFolders);
-        setSettings(mergedSettings);
-
-        setCurrentHistoryId(nextHistory[0]?.id ?? null);
-      } catch (e: any) {
-        console.error(e);
-        setError("저장소(IndexedDB) 로드에 실패했어요. 브라우저 설정을 확인해줘.");
-      }
-    })();
-
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  async function updateSettings(patch: Partial<AppSettings>) {
-    const next: AppSettings = { ...settings, ...patch };
-    // 안전 클램프
-    next.fontSize = clamp(Number(next.fontSize || DEFAULT_SETTINGS.fontSize), 14, 22);
-    next.lineHeight = clamp(Number(next.lineHeight || DEFAULT_SETTINGS.lineHeight), 1.4, 2.2);
-    next.containerMaxWidth = clamp(Number(next.containerMaxWidth || DEFAULT_SETTINGS.containerMaxWidth), 680, 980);
-    next.theme = next.theme === "dark" ? "dark" : "light";
-
-    setSettings(next);
-    try {
-      await dbSaveSettings(next);
-    } catch (e) {
-      console.error(e);
-      alert("설정 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
-    }
-  }
-
-  async function resetSettings() {
-    await updateSettings(DEFAULT_SETTINGS);
-  }
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
@@ -418,24 +533,18 @@ export default function Page() {
 
   const selectedCount = useMemo(() => Object.values(selectedIds).filter(Boolean).length, [selectedIds]);
 
-  async function persistHistory(next: HistoryItem[]) {
+  function persistHistory(next: HistoryItem[]) {
     setHistory(next);
     try {
-      await dbReplaceAll<HistoryItem>(STORE_HISTORY, next);
-    } catch (e) {
-      console.error(e);
-      alert("히스토리 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
-    }
+      saveHistory(next);
+    } catch {}
   }
 
-  async function persistFolders(next: HistoryFolder[]) {
+  function persistFolders(next: HistoryFolder[]) {
     setFolders(next);
     try {
-      await dbReplaceAll<HistoryFolder>(STORE_FOLDERS, next);
-    } catch (e) {
-      console.error(e);
-      alert("폴더 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
-    }
+      saveFolders(next);
+    } catch {}
   }
 
   function folderNameById(id: string | null) {
@@ -480,17 +589,14 @@ export default function Page() {
     setSelectMode(true);
     setSelectedIds({});
   }
-
   function disableSelectMode() {
     setSelectMode(false);
     setSelectedIds({});
     setMovePickerOpen(false);
   }
-
   function toggleSelect(id: string) {
     setSelectedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
-
   function getSelectedItemIds(): string[] {
     return Object.entries(selectedIds)
       .filter(([, v]) => v)
@@ -500,7 +606,7 @@ export default function Page() {
   /* =========================
      폴더 액션
   ========================= */
-  async function createFolderNested() {
+  function createFolderNested() {
     const name = prompt("새 폴더 이름을 입력해줘");
     if (!name) return;
     const trimmed = name.trim();
@@ -510,15 +616,15 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       name: trimmed,
-      parentId: selectedFolderId,
+      parentId: selectedFolderId, // 현재 폴더 안에 생성
     };
 
-    const next = [...folders, f].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-    await persistFolders(next);
+    const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
+    persistFolders(next);
     setHistoryPage(1);
   }
 
-  async function renameCurrentFolder() {
+  function renameCurrentFolder() {
     if (selectedFolderId === null) {
       alert("‘전체’는 이름을 바꿀 수 없어.");
       return;
@@ -532,10 +638,10 @@ export default function Page() {
     if (!trimmed) return;
 
     const next = folders.map((x) => (x.id === f.id ? { ...x, name: trimmed } : x));
-    await persistFolders(next);
+    persistFolders(next);
   }
 
-  async function deleteCurrentFolder() {
+  function deleteCurrentFolder() {
     if (selectedFolderId === null) {
       alert("‘전체’는 삭제할 수 없어.");
       return;
@@ -549,10 +655,10 @@ export default function Page() {
     const idsToDelete = collectDescFolderIds(f.id);
 
     const nextFolders = folders.filter((x) => !idsToDelete.includes(x.id));
-    const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
+    persistFolders(nextFolders);
 
-    await persistFolders(nextFolders);
-    await persistHistory(nextHistory);
+    const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
+    persistHistory(nextHistory);
 
     setSelectedFolderId(f.parentId);
     setHistoryPage(1);
@@ -579,30 +685,29 @@ export default function Page() {
     setMovePickerOpen(true);
   }
 
-  async function moveSelectedToFolder(targetFolderId: string | null) {
+  function moveSelectedToFolder(targetFolderId: string | null) {
     const ids = getSelectedItemIds();
     if (ids.length === 0) return;
 
     const next = history.map((h) => (ids.includes(h.id) ? { ...h, folderId: targetFolderId } : h));
-    await persistHistory(next);
+    persistHistory(next);
 
     setMovePickerOpen(false);
     alert(`이동 완료: "${folderNameById(targetFolderId)}"`);
     disableSelectMode();
   }
 
-  async function deleteSelectedItems() {
+  function deleteSelectedItems() {
     const ids = getSelectedItemIds();
     if (ids.length === 0) {
       alert("삭제할 번역본을 먼저 체크해줘.");
       return;
     }
-
     const ok = confirm(`선택한 ${ids.length}개 항목을 삭제할까요?`);
     if (!ok) return;
 
     const next = history.filter((h) => !ids.includes(h.id));
-    await persistHistory(next);
+    persistHistory(next);
 
     const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
@@ -619,40 +724,17 @@ export default function Page() {
     disableSelectMode();
   }
 
-  // ✅ 헤더 기본값은 고정: URL 번역은 ON, 수동 번역은 OFF
-  function inferHeaderForItem(it: HistoryItem) {
-    return !!it.url;
-  }
-
   function loadHistoryItem(it: HistoryItem) {
     setSeriesTitle(it.seriesTitle);
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
     setResultBody(it.translatedText || "");
-
-    const inferred = inferHeaderForItem(it);
-    setShowHeader(typeof it.showHeader === "boolean" ? it.showHeader : inferred);
-
+    setShowHeader(!!it.showHeader);
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
     setHistoryOpen(false);
-  }
-
-  async function toggleHeaderForHistoryItem(id: string) {
-    const it = history.find((x) => x.id === id);
-    if (!it) return;
-
-    const current = typeof it.showHeader === "boolean" ? it.showHeader : inferHeaderForItem(it);
-    const nextValue = !current;
-
-    const next = history.map((h) => (h.id === id ? { ...h, showHeader: nextValue } : h));
-    await persistHistory(next);
-
-    if (currentHistoryId === id) {
-      setShowHeader(nextValue);
-    }
   }
 
   async function handleCopy(text: string) {
@@ -669,7 +751,6 @@ export default function Page() {
     const it = history[currentIndex + 1];
     if (it) loadHistoryItem(it);
   }
-
   function goNext() {
     if (!canNext) return;
     const it = history[currentIndex - 1];
@@ -695,7 +776,7 @@ export default function Page() {
     return String((data as any)?.translated ?? "");
   }
 
-  async function autoSaveToHistory(params: {
+  function autoSaveToHistory(params: {
     sourceText: string;
     translatedBody: string;
     url?: string;
@@ -717,8 +798,8 @@ export default function Page() {
       showHeader: params.showHeader,
     };
 
-    const next = [item, ...history].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    await persistHistory(next);
+    const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
+    persistHistory(next);
     setCurrentHistoryId(item.id);
     setHistoryPage(1);
   }
@@ -760,11 +841,10 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 기본값 고정: URL 번역만 헤더 표시
       const nextShowHeader = mode === "url";
       setShowHeader(nextShowHeader);
 
-      await autoSaveToHistory({
+      autoSaveToHistory({
         sourceText: text.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
@@ -815,9 +895,7 @@ export default function Page() {
       if (data?.title) setSeriesTitle(String(data.title));
       const text = String(data?.text ?? "");
       if (!text.trim()) {
-        throw new Error(
-          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
-        );
+        throw new Error("본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘.");
       }
 
       setSource(text);
@@ -841,741 +919,1203 @@ export default function Page() {
   }
 
   /* =========================
-     Theme colors
+     ✅ 배경/뷰어 스타일 적용
   ========================= */
-  const theme = settings.theme;
-  const bg = theme === "dark" ? "#0b0c10" : "#ffffff";
-  const fg = theme === "dark" ? "#f2f4f8" : "#111111";
-  const cardBg = theme === "dark" ? "#12141b" : "#ffffff";
-  const border = theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd";
-  const subtleBorder = theme === "dark" ? "1px solid #222733" : "1px solid #eee";
-  const overlay = "rgba(0,0,0,0.35)";
+  const bgCss = useMemo(() => buildBackgroundCss(settings), [settings]);
+  const vignetteCss = useMemo(() => buildVignetteStyle(settings.vignette), [settings.vignette]);
+
+  const isDarkBg = useMemo(() => {
+    // 아주 단순한 다크 판단
+    const c = settings.baseColor.replace("#", "");
+    if (c.length !== 6) return false;
+    const r = parseInt(c.slice(0, 2), 16);
+    const g = parseInt(c.slice(2, 4), 16);
+    const b = parseInt(c.slice(4, 6), 16);
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return luma < 80;
+  }, [settings.baseColor]);
+
+  const textColor = isDarkBg ? "#F3F3F3" : "#151515";
+  const mutedColor = isDarkBg ? "rgba(243,243,243,0.65)" : "rgba(0,0,0,0.55)";
+
+  const cardBg = isDarkBg ? "rgba(20,20,20,0.75)" : "rgba(255,255,255,0.78)";
+  const cardBorder = isDarkBg ? "1px solid rgba(255,255,255,0.10)" : "1px solid rgba(0,0,0,0.10)";
 
   /* =========================
-     Settings Preview (미리보기)
+     UI
   ========================= */
-  const previewTitle = headerPreview.title || "패러디소설";
-  const previewEp = headerPreview.epLine || "제 1화";
-  const previewBody =
-    (resultBody || "").trim() ||
-    "미리보기 텍스트입니다.\n\n여기에서 글자 크기, 줄 간격, 화면 폭이 어떻게 보이는지 즉시 확인할 수 있어요.\n\n(실제 번역 결과가 있으면 그걸 먼저 보여줘요.)";
-
   return (
-    <main style={{ maxWidth: settings.containerMaxWidth, margin: "0 auto", padding: 24, paddingBottom: 86, background: bg, color: fg, minHeight: "100vh" }}>
-      {/* 상단바 */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
-        <div>
-          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
-          <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임 (영구 저장)</div>
-        </div>
+    <div
+      style={{
+        minHeight: "100vh",
+        position: "relative",
+        ...bgCss,
+      }}
+    >
+      {/* 비네팅 레이어 */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          ...vignetteCss,
+        }}
+      />
 
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <button
-            onClick={() => {
-              setHistoryOpen(true);
-              setHistoryPage(1);
-              setMenuOpen(false);
-              setMenuAnchor(null);
-            }}
-            style={{ width: 44, height: 40, borderRadius: 12, border, cursor: "pointer", fontWeight: 900, background: cardBg, fontSize: 18, color: fg }}
-            title="히스토리"
-            aria-label="히스토리"
-          >
-            ☰
-          </button>
+      <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86, position: "relative", color: textColor }}>
+        {/* 상단바 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+          <div>
+            <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
+            <div style={{ fontSize: 13, opacity: 0.85, marginTop: 6, color: mutedColor }}>
+              자동 저장: ☰ 목록에 시간순으로 쌓임
+            </div>
+          </div>
 
-          <button
-            onClick={() => setSettingsOpen(true)}
-            style={{ width: 44, height: 40, borderRadius: 12, border, cursor: "pointer", fontWeight: 900, background: cardBg, fontSize: 18, color: fg }}
-            title="설정"
-            aria-label="설정"
-          >
-            ⚙️
-          </button>
-        </div>
-      </div>
-
-      {/* URL 입력 */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        <input
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          placeholder="URL 붙여넣기"
-          style={{ flex: 1, padding: 10, borderRadius: 10, border, background: cardBg, color: fg }}
-        />
-        <button
-          onClick={fetchFromUrl}
-          disabled={isFetchingUrl || !url.trim()}
-          style={{
-            height: 40,
-            padding: "0 12px",
-            borderRadius: 10,
-            border,
-            cursor: isFetchingUrl || !url.trim() ? "not-allowed" : "pointer",
-            fontWeight: 900,
-            background: cardBg,
-            opacity: isFetchingUrl || !url.trim() ? 0.6 : 1,
-            color: fg,
-          }}
-        >
-          {isFetchingUrl ? "불러오는 중…" : "본문 불러오기"}
-        </button>
-      </div>
-
-      {/* 텍스트 직접 번역 */}
-      <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
-
-        <div style={{ marginTop: 10 }}>
-          <textarea
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            placeholder="원문을 직접 붙여넣기"
-            style={{ width: "100%", minHeight: 160, padding: 12, borderRadius: 10, border, whiteSpace: "pre-wrap", background: cardBg, color: fg }}
-          />
-
-          <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+          {/* ✅ 우측: 히스토리(☰) + 설정(⚙️) */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <button
-              onClick={() => runTranslation(source, { mode: "manual" })}
-              disabled={isLoading || !source.trim()}
+              onClick={() => {
+                setHistoryOpen(true);
+                setHistoryPage(1);
+                setMenuOpen(false);
+                setMenuAnchor(null);
+              }}
               style={{
+                width: 44,
                 height: 40,
-                padding: "0 12px",
-                borderRadius: 10,
-                border,
-                cursor: isLoading || !source.trim() ? "not-allowed" : "pointer",
+                borderRadius: 12,
+                border: cardBorder,
+                cursor: "pointer",
                 fontWeight: 900,
                 background: cardBg,
-                opacity: isLoading || !source.trim() ? 0.6 : 1,
-                color: fg,
+                fontSize: 18,
+                color: textColor,
               }}
+              title="히스토리"
+              aria-label="히스토리"
             >
-              {isLoading ? "번역 중…" : "번역하기"}
+              ☰
             </button>
 
-            {isLoading && (
-              <button onClick={handleCancel} style={{ height: 40, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
-                취소
-              </button>
-            )}
-
-            {progress && (
-              <span style={{ fontSize: 13, opacity: 0.75 }}>
-                진행 {percent}% ({progress.current}/{progress.total})
-              </span>
-            )}
+            <button
+              onClick={() => setSettingsOpen(true)}
+              style={{
+                width: 44,
+                height: 40,
+                borderRadius: 12,
+                border: cardBorder,
+                cursor: "pointer",
+                fontWeight: 900,
+                background: cardBg,
+                fontSize: 18,
+                color: textColor,
+              }}
+              title="설정"
+              aria-label="설정"
+            >
+              ⚙️
+            </button>
           </div>
         </div>
-      </details>
 
-      {error && <div style={{ color: "#ff4d4f", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
-
-      {/* 결과 Viewer */}
-      <div style={{ marginTop: 14 }}>
-        <div style={{ fontWeight: 900, opacity: 0.85, marginBottom: 8 }}>번역 결과</div>
-
-        <div
-          style={{
-            border,
-            borderRadius: 14,
-            padding: 16,
-            background: cardBg,
-            minHeight: 240,
-            whiteSpace: "pre-wrap",
-            lineHeight: settings.lineHeight,
-            color: fg,
-          }}
-        >
-          {!resultBody.trim() ? (
-            <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
-          ) : (
-            <>
-              {showHeader && (
-                <>
-                  <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
-                  <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
-                </>
-              )}
-              <div style={{ fontSize: settings.fontSize }}>{resultBody}</div>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* =========================
-          Settings Modal
-         ========================= */}
-      {settingsOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10002 }}
-          onClick={() => setSettingsOpen(false)}
-        >
-          <div
-            style={{ width: "min(820px, 100%)", maxHeight: "85vh", overflow: "auto", background: cardBg, color: fg, borderRadius: 14, border, padding: 14 }}
-            onClick={(e) => e.stopPropagation()}
+        {/* URL 입력 */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="URL 붙여넣기"
+            style={{
+              flex: 1,
+              padding: 10,
+              borderRadius: 10,
+              border: cardBorder,
+              background: cardBg,
+              color: textColor,
+              outline: "none",
+            }}
+          />
+          <button
+            onClick={fetchFromUrl}
+            disabled={isFetchingUrl || !url.trim()}
+            style={{
+              height: 40,
+              padding: "0 12px",
+              borderRadius: 10,
+              border: cardBorder,
+              cursor: isFetchingUrl || !url.trim() ? "not-allowed" : "pointer",
+              fontWeight: 900,
+              background: cardBg,
+              opacity: isFetchingUrl || !url.trim() ? 0.6 : 1,
+              color: textColor,
+            }}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-              <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
-              <button onClick={() => setSettingsOpen(false)} style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
-                닫기
-              </button>
-            </div>
+            {isFetchingUrl ? "불러오는 중…" : "본문 불러오기"}
+          </button>
+        </div>
 
-            {/* ✅ 미리보기 (항상 보이게) */}
-            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 10 }}>미리보기</div>
-              <div
+        {/* 텍스트 직접 번역 */}
+        <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.92 }}>텍스트 직접 번역</summary>
+
+          <div style={{ marginTop: 10 }}>
+            <textarea
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              placeholder="원문을 직접 붙여넣기"
+              style={{
+                width: "100%",
+                minHeight: 160,
+                padding: 12,
+                borderRadius: 10,
+                border: cardBorder,
+                background: cardBg,
+                color: textColor,
+                whiteSpace: "pre-wrap",
+                outline: "none",
+              }}
+            />
+
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+              <button
+                onClick={() => runTranslation(source, { mode: "manual" })}
+                disabled={isLoading || !source.trim()}
                 style={{
-                  border,
-                  borderRadius: 14,
-                  padding: 14,
-                  background: theme === "dark" ? "#0f1118" : "#fff",
-                  whiteSpace: "pre-wrap",
-                  lineHeight: settings.lineHeight,
+                  height: 40,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: cardBorder,
+                  cursor: isLoading || !source.trim() ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  background: cardBg,
+                  opacity: isLoading || !source.trim() ? 0.6 : 1,
+                  color: textColor,
                 }}
               >
-                <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 6 }}>{previewTitle}</div>
-                <div style={{ fontSize: 13, opacity: 0.75, marginBottom: 16 }}>{previewEp}</div>
-                <div style={{ fontSize: settings.fontSize }}>{previewBody}</div>
-              </div>
-              <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10, lineHeight: 1.5 }}>
-                ※ 여기서 보이는 변화는 즉시 반영돼. (테마/글자크기/줄간격/폭)
-              </div>
-            </div>
-
-            {/* ✅ 기본 접힘 섹션들 */}
-            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>테마</summary>
-              <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                <button
-                  onClick={() => updateSettings({ theme: "light" })}
-                  style={{
-                    height: 36,
-                    padding: "0 12px",
-                    borderRadius: 10,
-                    border,
-                    cursor: "pointer",
-                    fontWeight: 900,
-                    background: settings.theme === "light" ? "#111" : cardBg,
-                    color: settings.theme === "light" ? "#fff" : fg,
-                  }}
-                >
-                  라이트
-                </button>
-                <button
-                  onClick={() => updateSettings({ theme: "dark" })}
-                  style={{
-                    height: 36,
-                    padding: "0 12px",
-                    borderRadius: 10,
-                    border,
-                    cursor: "pointer",
-                    fontWeight: 900,
-                    background: settings.theme === "dark" ? "#111" : cardBg,
-                    color: settings.theme === "dark" ? "#fff" : fg,
-                  }}
-                >
-                  다크
-                </button>
-              </div>
-            </details>
-
-            {/* ✅ 섹션명 변경: 번역 결과 보기 → 서식 편집 */}
-            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
-
-              <div style={{ marginTop: 12 }}>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>글자 크기: {settings.fontSize}px</div>
-                <input
-                  type="range"
-                  min={14}
-                  max={22}
-                  value={settings.fontSize}
-                  onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })}
-                  style={{ width: "100%" }}
-                />
-              </div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>줄 간격: {settings.lineHeight.toFixed(1)}</div>
-                <input
-                  type="range"
-                  min={14}
-                  max={22}
-                  value={Math.round(settings.lineHeight * 10)}
-                  onChange={(e) => updateSettings({ lineHeight: Number(e.target.value) / 10 })}
-                  style={{ width: "100%" }}
-                />
-              </div>
-
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 800, marginBottom: 6 }}>전체 폭: {settings.containerMaxWidth}px</div>
-                <input
-                  type="range"
-                  min={680}
-                  max={980}
-                  step={10}
-                  value={settings.containerMaxWidth}
-                  onChange={(e) => updateSettings({ containerMaxWidth: Number(e.target.value) })}
-                  style={{ width: "100%" }}
-                />
-              </div>
-            </details>
-
-            {/* ✅ 앞으로 기능들 추가될 자리: 기본 접힘 */}
-            <details style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }} open={false}>
-              <summary style={{ cursor: "pointer", fontWeight: 900 }}>추가 기능 (준비중)</summary>
-              <div style={{ marginTop: 12, fontSize: 13, opacity: 0.75, lineHeight: 1.6 }}>
-                여기에 앞으로 옵션들이 계속 들어갈 거야.
-                <br />
-                기본은 접혀 있고, 눌러서 펼쳐서 편집하는 구조로 유지할게.
-              </div>
-            </details>
-
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 14 }}>
-              <button onClick={resetSettings} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
-                설정 초기화
+                {isLoading ? "번역 중…" : "번역하기"}
               </button>
 
-              <button onClick={() => setSettingsOpen(false)} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: "#111", color: "#fff" }}>
-                닫기
-              </button>
+              {isLoading && (
+                <button
+                  onClick={handleCancel}
+                  style={{
+                    height: 40,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border: cardBorder,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: cardBg,
+                    color: textColor,
+                  }}
+                >
+                  취소
+                </button>
+              )}
+
+              {progress && (
+                <span style={{ fontSize: 13, opacity: 0.9, color: mutedColor }}>
+                  진행 {percent}% ({progress.current}/{progress.total})
+                </span>
+              )}
             </div>
           </div>
-        </div>
-      )}
+        </details>
 
-      {/* =========================
-          History Modal
-         ========================= */}
-      {historyOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 9999 }}
-          onClick={() => {
-            setHistoryOpen(false);
-            setMenuOpen(false);
-            setMenuAnchor(null);
-            disableSelectMode();
-          }}
-        >
+        {error && (
+          <div style={{ color: "#FF4D4D", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>
+            {error}
+          </div>
+        )}
+
+        {/* 결과 Viewer */}
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontWeight: 900, opacity: 0.92, marginBottom: 8 }}>번역 결과</div>
+
           <div
             style={{
-              width: "min(920px, 100%)",
-              maxHeight: "85vh",
-              overflow: "auto",
-              background: cardBg,
-              color: fg,
+              border: cardBorder,
               borderRadius: 14,
-              border,
-              padding: 14,
-              position: "relative",
+              padding: 16,
+              background: cardBg,
+              minHeight: 240,
+              whiteSpace: "pre-wrap",
+              lineHeight: settings.lineHeight,
+              fontSize: settings.fontSize,
+              color: textColor,
             }}
-            onClick={(e) => e.stopPropagation()}
           >
-            {/* 헤더 */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>목록</div>
-
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span>
-                    현재 폴더: <b>{breadcrumbText}</b>
-                  </span>
-
-                  {selectedFolderId !== null && (
-                    <button
-                      onClick={renameCurrentFolder}
-                      style={{ width: 32, height: 28, borderRadius: 10, border, background: cardBg, cursor: "pointer", fontWeight: 900, color: fg }}
-                      title="폴더 이름 수정"
-                    >
-                      ✏️
-                    </button>
-                  )}
-
-                  {selectMode && <span style={{ fontWeight: 900 }}>· 선택 {selectedCount}개</span>}
-                </div>
-              </div>
-
-              <button
-                onClick={() => {
-                  setHistoryOpen(false);
-                  setMenuOpen(false);
-                  setMenuAnchor(null);
-                  disableSelectMode();
-                }}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
-              >
-                닫기
-              </button>
-            </div>
-
-            {/* 상단: 전체/뒤로 */}
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-              <button
-                onClick={() => {
-                  setSelectedFolderId(null);
-                  setHistoryPage(1);
-                  disableSelectMode();
-                }}
-                style={{
-                  height: 34,
-                  padding: "0 12px",
-                  borderRadius: 999,
-                  border,
-                  background: selectedFolderId === null ? "#111" : cardBg,
-                  color: selectedFolderId === null ? "#fff" : fg,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                }}
-              >
-                전체
-              </button>
-
-              <button
-                onClick={goUpFolder}
-                disabled={selectedFolderId === null}
-                style={{
-                  width: 44,
-                  height: 34,
-                  borderRadius: 999,
-                  border,
-                  background: cardBg,
-                  cursor: selectedFolderId === null ? "not-allowed" : "pointer",
-                  fontWeight: 900,
-                  opacity: selectedFolderId === null ? 0.5 : 1,
-                  color: fg,
-                }}
-                title="상위 폴더"
-              >
-                ⬅
-              </button>
-            </div>
-
-            {/* 서브폴더 */}
-            {currentSubFolders.length > 0 && (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-                {currentSubFolders
-                  .slice()
-                  .sort((a, b) => a.name.localeCompare(b.name, "ko"))
-                  .map((f) => (
-                    <button
-                      key={f.id}
-                      onClick={() => {
-                        setSelectedFolderId(f.id);
-                        setHistoryPage(1);
-                        disableSelectMode();
-                      }}
-                      style={{ height: 34, padding: "0 12px", borderRadius: 999, border, background: cardBg, cursor: "pointer", fontWeight: 900, color: fg }}
-                    >
-                      📁 {f.name}
-                    </button>
-                  ))}
-              </div>
-            )}
-
-            {/* 리스트 */}
-            {filteredHistory.length === 0 ? (
-              <div style={{ opacity: 0.65, padding: 10 }}>(이 폴더에 저장된 항목이 없어요)</div>
+            {!resultBody.trim() ? (
+              <div style={{ opacity: 0.8, color: mutedColor }}>번역 결과가 여기에 표시됩니다.</div>
             ) : (
               <>
-                <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
-                  {pagedHistory.map((it) => {
-                    const label = `${it.seriesTitle} · ${it.episodeNo}화`;
-                    const checked = !!selectedIds[it.id];
-                    const effectiveHeader = typeof it.showHeader === "boolean" ? it.showHeader : inferHeaderForItem(it);
+                {showHeader && (
+                  <>
+                    <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
+                    <div style={{ fontSize: 14, opacity: 0.85, marginBottom: 28, color: mutedColor }}>{headerPreview.epLine}</div>
+                  </>
+                )}
+                <div>{resultBody}</div>
+              </>
+            )}
+          </div>
+        </div>
 
-                    return (
-                      <div
-                        key={it.id}
-                        style={{
-                          border: selectMode && checked ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : subtleBorder,
-                          borderRadius: 12,
-                          padding: 12,
-                          background: cardBg,
-                          display: "flex",
-                          gap: 10,
-                          alignItems: "center",
-                        }}
-                      >
-                        {selectMode && <input type="checkbox" checked={checked} onChange={() => toggleSelect(it.id)} style={{ width: 18, height: 18, cursor: "pointer" }} aria-label="항목 선택" />}
-
-                        <button
-                          onClick={() => {
-                            if (selectMode) {
-                              toggleSelect(it.id);
-                              return;
-                            }
-                            loadHistoryItem(it);
-                          }}
-                          style={{ flex: 1, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", color: fg }}
-                          title={selectMode ? "선택/해제" : "불러오기"}
-                        >
-                          <div style={{ fontWeight: 900, display: "flex", gap: 8, alignItems: "center" }}>
-                            <span>{label}</span>
-                            <span style={{ fontSize: 12, opacity: 0.7 }}>{effectiveHeader ? "· 헤더 ON" : "· 헤더 OFF"}</span>
-                          </div>
-                          <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                            {formatDate(it.createdAt)}
-                            {it.url ? ` · URL 저장됨` : ""}
-                          </div>
-                        </button>
-
-                        <button
-                          onClick={() => toggleHeaderForHistoryItem(it.id)}
-                          style={{ width: 46, height: 34, borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
-                          title="이 항목의 헤더 표시 토글"
-                          aria-label="헤더 표시 토글"
-                        >
-                          🏷
-                        </button>
-
-                        <button
-                          onClick={() => handleCopy(it.translatedText)}
-                          style={{ width: 46, height: 34, borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
-                          title="번역본 복사"
-                        >
-                          📋
-                        </button>
-                      </div>
-                    );
-                  })}
+        {/* =========================
+            ✅ Settings Modal
+           ========================= */}
+        {settingsOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.45)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 16,
+              zIndex: 11000,
+            }}
+            onClick={() => setSettingsOpen(false)}
+          >
+            <div
+              style={{
+                width: "min(920px, 100%)",
+                maxHeight: "85vh",
+                overflow: "auto",
+                background: isDarkBg ? "#121212" : "#fff",
+                borderRadius: 14,
+                border: "1px solid rgba(0,0,0,0.12)",
+                padding: 14,
+                color: isDarkBg ? "#F3F3F3" : "#111",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
+                  <div style={{ fontSize: 12, opacity: 0.75, marginTop: 4 }}>기본은 A안(빈티지 종이) · 변경사항은 즉시 미리보기로 확인</div>
                 </div>
 
-                {totalPages > 1 && (
+                <button
+                  onClick={() => setSettingsOpen(false)}
+                  style={{
+                    height: 36,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(0,0,0,0.15)",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: isDarkBg ? "#1C1C1C" : "#fff",
+                    color: isDarkBg ? "#F3F3F3" : "#111",
+                  }}
+                >
+                  닫기
+                </button>
+              </div>
+
+              {/* ✅ 배경 편집 */}
+              <details open style={{ border: "1px solid rgba(0,0,0,0.10)", borderRadius: 14, padding: 12, background: isDarkBg ? "#191919" : "#FAFAFA" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>배경 편집</summary>
+
+                <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+                  {/* 프리셋 */}
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <div style={{ fontWeight: 900, opacity: 0.85 }}>프리셋</div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {[
+                        { key: "vintage", label: "Vintage Paper" },
+                        { key: "minimalLight", label: "Minimal Light" },
+                        { key: "inkDark", label: "Ink Dark" },
+                        { key: "nightReading", label: "Night Reading" },
+                      ].map((p) => {
+                        const active = settings.preset === (p.key as ThemePreset);
+                        return (
+                          <button
+                            key={p.key}
+                            onClick={() => {
+                              const patch = applyPreset(p.key as ThemePreset);
+                              updateSettings(patch);
+                            }}
+                            style={{
+                              height: 34,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid rgba(0,0,0,0.15)",
+                              cursor: "pointer",
+                              fontWeight: 900,
+                              background: active ? "#111" : isDarkBg ? "#222" : "#fff",
+                              color: active ? "#fff" : isDarkBg ? "#F3F3F3" : "#111",
+                            }}
+                          >
+                            {p.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 배경 타입 */}
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <div style={{ fontWeight: 900, opacity: 0.85 }}>배경 타입</div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {[
+                        { key: "paper", label: "종이" },
+                        { key: "solid", label: "단색" },
+                        { key: "gradient", label: "그라데이션" },
+                        { key: "image", label: "이미지(URL)" },
+                      ].map((t) => {
+                        const active = settings.backgroundType === (t.key as BackgroundType);
+                        return (
+                          <button
+                            key={t.key}
+                            onClick={() => updateSettings({ backgroundType: t.key as BackgroundType })}
+                            style={{
+                              height: 34,
+                              padding: "0 12px",
+                              borderRadius: 999,
+                              border: "1px solid rgba(0,0,0,0.15)",
+                              cursor: "pointer",
+                              fontWeight: 900,
+                              background: active ? "#111" : isDarkBg ? "#222" : "#fff",
+                              color: active ? "#fff" : isDarkBg ? "#F3F3F3" : "#111",
+                            }}
+                          >
+                            {t.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* 컬러/URL */}
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {(settings.backgroundType === "solid" || settings.backgroundType === "paper") && (
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                        <div style={{ width: 120, fontWeight: 900, opacity: 0.85 }}>바탕색</div>
+                        <input
+                          type="color"
+                          value={settings.baseColor}
+                          onChange={(e) => updateSettings({ baseColor: e.target.value })}
+                          style={{ width: 48, height: 34, border: "none", background: "transparent" }}
+                        />
+                        <input
+                          value={settings.baseColor}
+                          onChange={(e) => updateSettings({ baseColor: e.target.value })}
+                          style={{
+                            padding: "8px 10px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(0,0,0,0.15)",
+                            width: 140,
+                            background: isDarkBg ? "#101010" : "#fff",
+                            color: isDarkBg ? "#F3F3F3" : "#111",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    {settings.backgroundType === "gradient" && (
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                        <div style={{ width: 120, fontWeight: 900, opacity: 0.85 }}>그라데이션</div>
+
+                        <input
+                          type="color"
+                          value={settings.gradientFrom}
+                          onChange={(e) => updateSettings({ gradientFrom: e.target.value })}
+                          style={{ width: 48, height: 34, border: "none", background: "transparent" }}
+                        />
+                        <input
+                          type="color"
+                          value={settings.gradientTo}
+                          onChange={(e) => updateSettings({ gradientTo: e.target.value })}
+                          style={{ width: 48, height: 34, border: "none", background: "transparent" }}
+                        />
+                      </div>
+                    )}
+
+                    {settings.backgroundType === "image" && (
+                      <div style={{ display: "grid", gap: 8 }}>
+                        <div style={{ fontWeight: 900, opacity: 0.85 }}>배경 이미지 URL</div>
+                        <input
+                          value={settings.imageUrl}
+                          onChange={(e) => updateSettings({ imageUrl: e.target.value })}
+                          placeholder='예) https://.../paper.jpg'
+                          style={{
+                            width: "100%",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(0,0,0,0.15)",
+                            background: isDarkBg ? "#101010" : "#fff",
+                            color: isDarkBg ? "#F3F3F3" : "#111",
+                            outline: "none",
+                          }}
+                        />
+                        <div style={{ fontSize: 12, opacity: 0.75 }}>
+                          참고: 사이트가 CORS/403을 걸면 이미지가 안 뜰 수 있어. 그때는 다른 이미지 주소를 쓰거나 종이/단색으로 바꿔줘.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 종이 느낌/가독성 */}
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div style={{ fontWeight: 900, opacity: 0.85 }}>종이 느낌 / 가독성</div>
+
+                    <div style={{ display: "grid", gap: 10 }}>
+                      <label style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ fontWeight: 900, opacity: 0.8 }}>종이결</span>
+                          <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.paperGrain}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={settings.paperGrain}
+                          onChange={(e) => updateSettings({ paperGrain: Number(e.target.value) })}
+                        />
+                      </label>
+
+                      <label style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ fontWeight: 900, opacity: 0.8 }}>비네팅</span>
+                          <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.vignette}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={settings.vignette}
+                          onChange={(e) => updateSettings({ vignette: Number(e.target.value) })}
+                        />
+                      </label>
+
+                      <label style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ fontWeight: 900, opacity: 0.8 }}>따뜻함(세피아)</span>
+                          <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.warmth}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={settings.warmth}
+                          onChange={(e) => updateSettings({ warmth: Number(e.target.value) })}
+                        />
+                      </label>
+
+                      <label style={{ display: "grid", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ fontWeight: 900, opacity: 0.8 }}>가독성 오버레이</span>
+                          <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.overlay}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={settings.overlay}
+                          onChange={(e) => updateSettings({ overlay: Number(e.target.value) })}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              {/* ✅ 서식 편집 (기본 접힘) */}
+              <details style={{ marginTop: 12, border: "1px solid rgba(0,0,0,0.10)", borderRadius: 14, padding: 12, background: isDarkBg ? "#191919" : "#FAFAFA" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
+
+                <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontWeight: 900, opacity: 0.8 }}>글자 크기</span>
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.fontSize}px</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={12}
+                      max={28}
+                      value={settings.fontSize}
+                      onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })}
+                    />
+                  </label>
+
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontWeight: 900, opacity: 0.8 }}>줄간격</span>
+                      <span style={{ fontSize: 12, opacity: 0.75 }}>{settings.lineHeight.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1.3}
+                      max={2.4}
+                      step={0.01}
+                      value={settings.lineHeight}
+                      onChange={(e) => updateSettings({ lineHeight: Number(e.target.value) })}
+                    />
+                  </label>
+                </div>
+              </details>
+
+              {/* ✅ 미리보기 */}
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontWeight: 900, opacity: 0.85, marginBottom: 8 }}>미리보기</div>
+
+                <div
+                  style={{
+                    border: "1px solid rgba(0,0,0,0.10)",
+                    borderRadius: 14,
+                    padding: 12,
+                    background: "rgba(255,255,255,0.35)",
+                  }}
+                >
                   <div
                     style={{
-                      position: "sticky",
-                      bottom: 0,
+                      border: cardBorder,
+                      borderRadius: 14,
+                      padding: 16,
                       background: cardBg,
-                      paddingTop: 10,
-                      paddingBottom: 10,
-                      borderTop: subtleBorder,
-                      display: "flex",
-                      justifyContent: "center",
-                      gap: 6,
+                      lineHeight: settings.lineHeight,
+                      fontSize: settings.fontSize,
+                      color: textColor,
                     }}
                   >
-                    {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => {
-                      const active = p === historyPage;
+                    <div style={{ fontSize: 22, fontWeight: 900, marginBottom: 8 }}>패러디 소설 제목</div>
+                    <div style={{ fontSize: 13, opacity: 0.85, marginBottom: 18, color: mutedColor }}>제 1화 · 부제목 예시</div>
+                    <div style={{ opacity: 0.95 }}>
+                      이건 미리보기 문장이다. 줄간격/글자크기/배경을 바꾸면 여기서 바로 느낌이 보여야 한다.
+                      <br />
+                      <br />
+                      그리고 실제 번역 결과 뷰어에도 동시에 반영된다.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* ✅ 앞으로 기능 더 붙일 자리(기본 접힘) */}
+              <details style={{ marginTop: 12, border: "1px solid rgba(0,0,0,0.10)", borderRadius: 14, padding: 12, background: isDarkBg ? "#191919" : "#FAFAFA" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>기타(추가 기능)</summary>
+                <div style={{ marginTop: 10, fontSize: 13, opacity: 0.8 }}>
+                  여기에는 나중에 “쿠키 입력”, “Pixiv 전용 옵션”, “내보내기 포맷”, “단축키” 같은 기능들을 접어서 추가할 수 있어.
+                </div>
+              </details>
+            </div>
+          </div>
+        )}
+
+        {/* =========================
+            History Modal
+           ========================= */}
+        {historyOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.35)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 16,
+              zIndex: 9999,
+            }}
+            onClick={() => {
+              setHistoryOpen(false);
+              setMenuOpen(false);
+              setMenuAnchor(null);
+              disableSelectMode();
+            }}
+          >
+            <div
+              style={{
+                width: "min(920px, 100%)",
+                maxHeight: "85vh",
+                overflow: "auto",
+                background: "#fff",
+                borderRadius: 14,
+                border: "1px solid #ddd",
+                padding: 14,
+                position: "relative",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 헤더 */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 900 }}>목록</div>
+
+                  {/* 상태줄 */}
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span>
+                      현재 폴더: <b>{breadcrumbText}</b>
+                    </span>
+
+                    {selectedFolderId !== null && (
+                      <button
+                        onClick={renameCurrentFolder}
+                        style={{
+                          width: 32,
+                          height: 28,
+                          borderRadius: 10,
+                          border: "1px solid #ddd",
+                          background: "#fff",
+                          cursor: "pointer",
+                          fontWeight: 900,
+                        }}
+                        title="폴더 이름 수정"
+                      >
+                        ✏️
+                      </button>
+                    )}
+
+                    {selectMode && <span style={{ fontWeight: 900 }}>· 선택 {selectedCount}개</span>}
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    setHistoryOpen(false);
+                    setMenuOpen(false);
+                    setMenuAnchor(null);
+                    disableSelectMode();
+                  }}
+                  style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
+                >
+                  닫기
+                </button>
+              </div>
+
+              {/* 상단: 전체/뒤로 */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+                <button
+                  onClick={() => {
+                    setSelectedFolderId(null);
+                    setHistoryPage(1);
+                    disableSelectMode();
+                  }}
+                  style={{
+                    height: 34,
+                    padding: "0 12px",
+                    borderRadius: 999,
+                    border: "1px solid #ddd",
+                    background: selectedFolderId === null ? "#111" : "#fff",
+                    color: selectedFolderId === null ? "#fff" : "#111",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                  }}
+                >
+                  전체
+                </button>
+
+                <button
+                  onClick={goUpFolder}
+                  disabled={selectedFolderId === null}
+                  style={{
+                    width: 44,
+                    height: 34,
+                    borderRadius: 999,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    cursor: selectedFolderId === null ? "not-allowed" : "pointer",
+                    fontWeight: 900,
+                    opacity: selectedFolderId === null ? 0.5 : 1,
+                  }}
+                  title="상위 폴더"
+                >
+                  ⬅
+                </button>
+              </div>
+
+              {/* 서브폴더 */}
+              {currentSubFolders.length > 0 && (
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                  {currentSubFolders
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name, "ko"))
+                    .map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => {
+                          setSelectedFolderId(f.id);
+                          setHistoryPage(1);
+                          disableSelectMode();
+                        }}
+                        style={{
+                          height: 34,
+                          padding: "0 12px",
+                          borderRadius: 999,
+                          border: "1px solid #ddd",
+                          background: "#fff",
+                          cursor: "pointer",
+                          fontWeight: 900,
+                        }}
+                      >
+                        📁 {f.name}
+                      </button>
+                    ))}
+                </div>
+              )}
+
+              {/* 리스트 */}
+              {filteredHistory.length === 0 ? (
+                <div style={{ opacity: 0.65, padding: 10 }}>(이 폴더에 저장된 항목이 없어요)</div>
+              ) : (
+                <>
+                  <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
+                    {pagedHistory.map((it) => {
+                      const label = `${it.seriesTitle} · ${it.episodeNo}화`;
+                      const checked = !!selectedIds[it.id];
+
                       return (
-                        <button
-                          key={p}
-                          onClick={() => setHistoryPage(p)}
-                          style={{ minWidth: 34, height: 32, padding: "0 10px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: active ? "#111" : cardBg, color: active ? "#fff" : fg }}
+                        <div
+                          key={it.id}
+                          style={{
+                            border: selectMode && checked ? "2px solid #111" : "1px solid #eee",
+                            borderRadius: 12,
+                            padding: 12,
+                            background: "#fff",
+                            display: "flex",
+                            gap: 10,
+                            alignItems: "center",
+                          }}
                         >
-                          {p}
-                        </button>
+                          {selectMode && (
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleSelect(it.id)}
+                              style={{ width: 18, height: 18, cursor: "pointer" }}
+                              aria-label="항목 선택"
+                            />
+                          )}
+
+                          <button
+                            onClick={() => {
+                              if (selectMode) {
+                                toggleSelect(it.id);
+                                return;
+                              }
+                              loadHistoryItem(it);
+                            }}
+                            style={{
+                              flex: 1,
+                              border: "none",
+                              background: "transparent",
+                              cursor: "pointer",
+                              textAlign: "left",
+                            }}
+                            title={selectMode ? "선택/해제" : "불러오기"}
+                          >
+                            <div style={{ fontWeight: 900 }}>{label}</div>
+                            <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                              {formatDate(it.createdAt)}
+                              {it.url ? ` · URL 저장됨` : ""}
+                            </div>
+                          </button>
+
+                          <button
+                            onClick={() => handleCopy(it.translatedText)}
+                            style={{
+                              width: 46,
+                              height: 34,
+                              borderRadius: 10,
+                              border: "1px solid #ddd",
+                              cursor: "pointer",
+                              fontWeight: 900,
+                              background: "#fff",
+                            }}
+                            title="번역본 복사"
+                          >
+                            📋
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
-                )}
-              </>
-            )}
 
-            <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
-              {selectMode && (
-                <>
-                  <button
-                    onClick={openMovePicker}
-                    disabled={selectedCount === 0}
-                    style={{ height: 40, padding: "0 12px", borderRadius: 14, border, background: cardBg, fontWeight: 900, cursor: selectedCount > 0 ? "pointer" : "not-allowed", opacity: selectedCount > 0 ? 1 : 0.5, fontSize: 13, color: fg }}
-                    title="이동"
-                  >
-                    이동
-                  </button>
-
-                  <div style={{ width: 8 }} />
-
-                  <button
-                    onClick={deleteSelectedItems}
-                    disabled={selectedCount === 0}
-                    style={{ height: 40, padding: "0 12px", borderRadius: 14, border, background: cardBg, fontWeight: 900, cursor: selectedCount > 0 ? "pointer" : "not-allowed", opacity: selectedCount > 0 ? 1 : 0.5, fontSize: 13, color: fg }}
-                    title="삭제"
-                  >
-                    삭제
-                  </button>
+                  {/* 페이지네이션 */}
+                  {totalPages > 1 && (
+                    <div
+                      style={{
+                        position: "sticky",
+                        bottom: 0,
+                        background: "#fff",
+                        paddingTop: 10,
+                        paddingBottom: 10,
+                        borderTop: "1px solid #eee",
+                        display: "flex",
+                        justifyContent: "center",
+                        gap: 6,
+                      }}
+                    >
+                      {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => {
+                        const active = p === historyPage;
+                        return (
+                          <button
+                            key={p}
+                            onClick={() => setHistoryPage(p)}
+                            style={{
+                              minWidth: 34,
+                              height: 32,
+                              padding: "0 10px",
+                              borderRadius: 10,
+                              border: "1px solid #ddd",
+                              cursor: "pointer",
+                              fontWeight: 900,
+                              background: active ? "#111" : "#fff",
+                              color: active ? "#fff" : "#111",
+                            }}
+                          >
+                            {p}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </>
               )}
 
-              <button
-                onClick={(e) => openMenuFromButton(e)}
-                style={{
-                  width: 52,
-                  height: 52,
-                  borderRadius: 18,
-                  border,
-                  background: cardBg,
-                  fontWeight: 900,
-                  cursor: "pointer",
-                  boxShadow: "0 10px 24px rgba(0,0,0,0.12)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 22,
-                  color: fg,
-                }}
-                title="메뉴"
-                aria-label="메뉴"
-              >
-                ➕
-              </button>
+              {/* 하단 오른쪽: 선택모드 이동/삭제 + + */}
+              <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
+                {selectMode && (
+                  <>
+                    <button
+                      onClick={openMovePicker}
+                      disabled={selectedCount === 0}
+                      style={{
+                        height: 40,
+                        padding: "0 12px",
+                        borderRadius: 14,
+                        border: "1px solid #ddd",
+                        background: "#fff",
+                        fontWeight: 900,
+                        cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                        opacity: selectedCount > 0 ? 1 : 0.5,
+                        fontSize: 13,
+                      }}
+                      title="이동"
+                    >
+                      이동
+                    </button>
+
+                    <div style={{ width: 8 }} />
+
+                    <button
+                      onClick={deleteSelectedItems}
+                      disabled={selectedCount === 0}
+                      style={{
+                        height: 40,
+                        padding: "0 12px",
+                        borderRadius: 14,
+                        border: "1px solid #ddd",
+                        background: "#fff",
+                        fontWeight: 900,
+                        cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                        opacity: selectedCount > 0 ? 1 : 0.5,
+                        fontSize: 13,
+                      }}
+                      title="삭제"
+                    >
+                      삭제
+                    </button>
+                  </>
+                )}
+
+                <button
+                  onClick={(e) => openMenuFromButton(e)}
+                  style={{
+                    width: 52,
+                    height: 52,
+                    borderRadius: 18,
+                    border: "1px solid #ddd",
+                    background: "#fff",
+                    fontWeight: 900,
+                    cursor: "pointer",
+                    boxShadow: "0 10px 24px rgba(0,0,0,0.12)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 22,
+                  }}
+                  title="메뉴"
+                  aria-label="메뉴"
+                >
+                  ➕
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* + 메뉴 팝업 (fixed) */}
-      {historyOpen && menuOpen && menuAnchor && (
-        <div
-          style={{ position: "fixed", inset: 0, zIndex: 10001 }}
-          onClick={() => {
-            setMenuOpen(false);
-            setMenuAnchor(null);
-          }}
-        >
+        {/* + 메뉴 팝업 (fixed) */}
+        {historyOpen && menuOpen && menuAnchor && (
           <div
-            style={{ position: "fixed", right: menuAnchor.right, bottom: menuAnchor.bottom, width: 220, background: cardBg, color: fg, border, borderRadius: 14, boxShadow: "0 18px 40px rgba(0,0,0,0.14)", padding: 8 }}
-            onClick={(e) => e.stopPropagation()}
+            style={{ position: "fixed", inset: 0, zIndex: 10001 }}
+            onClick={() => {
+              setMenuOpen(false);
+              setMenuAnchor(null);
+            }}
           >
-            <MenuButton
-              label="📁 새 폴더 만들기"
-              onClick={() => {
-                setMenuOpen(false);
-                setMenuAnchor(null);
-                createFolderNested();
+            <div
+              style={{
+                position: "fixed",
+                right: menuAnchor.right,
+                bottom: menuAnchor.bottom,
+                width: 220,
+                background: "#fff",
+                border: "1px solid #ddd",
+                borderRadius: 14,
+                boxShadow: "0 18px 40px rgba(0,0,0,0.14)",
+                padding: 8,
               }}
-            />
+              onClick={(e) => e.stopPropagation()}
+            >
+              <MenuButton
+                label="📁 새 폴더 만들기"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setMenuAnchor(null);
+                  createFolderNested();
+                }}
+              />
 
-            <MenuButton
-              label="🗑 폴더 삭제"
-              disabled={selectedFolderId === null}
-              onClick={() => {
-                setMenuOpen(false);
-                setMenuAnchor(null);
-                deleteCurrentFolder();
-              }}
-            />
+              <MenuButton
+                label="🗑 폴더 삭제"
+                disabled={selectedFolderId === null}
+                onClick={() => {
+                  setMenuOpen(false);
+                  setMenuAnchor(null);
+                  deleteCurrentFolder();
+                }}
+              />
 
-            <div style={{ height: 1, background: theme === "dark" ? "#2a2f3a" : "#eee", margin: "8px 6px" }} />
+              <div style={{ height: 1, background: "#eee", margin: "8px 6px" }} />
 
-            <MenuButton
-              label={selectMode ? "✅ 파일선택 종료" : "☑️ 파일선택"}
-              onClick={() => {
-                setMenuOpen(false);
-                setMenuAnchor(null);
-                if (!selectMode) enableSelectMode();
-                else disableSelectMode();
-              }}
-            />
+              <MenuButton
+                label={selectMode ? "✅ 파일선택 종료" : "☑️ 파일선택"}
+                onClick={() => {
+                  setMenuOpen(false);
+                  setMenuAnchor(null);
+                  if (!selectMode) enableSelectMode();
+                  else disableSelectMode();
+                }}
+              />
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Move Picker Modal */}
-      {movePickerOpen && (
-        <div role="dialog" aria-modal="true" style={{ position: "fixed", inset: 0, background: overlay, display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 10000 }} onClick={() => setMovePickerOpen(false)}>
-          <div style={{ width: "min(720px, 100%)", maxHeight: "80vh", overflow: "auto", background: cardBg, color: fg, borderRadius: 14, border, padding: 14 }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                  선택된 항목: <b>{selectedCount}개</b> · 대상 폴더: <b>{folderNameById(moveTargetFolderId)}</b>
+        {/* Move Picker Modal */}
+        {movePickerOpen && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.35)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 16,
+              zIndex: 10000,
+            }}
+            onClick={() => setMovePickerOpen(false)}
+          >
+            <div
+              style={{
+                width: "min(720px, 100%)",
+                maxHeight: "80vh",
+                overflow: "auto",
+                background: "#fff",
+                borderRadius: 14,
+                border: "1px solid #ddd",
+                padding: 14,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                    선택된 항목: <b>{selectedCount}개</b> · 대상 폴더: <b>{folderNameById(moveTargetFolderId)}</b>
+                  </div>
                 </div>
+
+                <button
+                  onClick={() => setMovePickerOpen(false)}
+                  style={{
+                    height: 36,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: "#fff",
+                  }}
+                >
+                  닫기
+                </button>
               </div>
 
-              <button onClick={() => setMovePickerOpen(false)} style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
-                닫기
-              </button>
-            </div>
+              <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
+                <button
+                  onClick={() => setMoveTargetFolderId(null)}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "10px 10px",
+                    borderRadius: 10,
+                    border: moveTargetFolderId === null ? "2px solid #111" : "1px solid #ddd",
+                    background: "#fff",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                  }}
+                >
+                  🧺 전체
+                </button>
 
-            <div style={{ border: subtleBorder, borderRadius: 12, padding: 10 }}>
-              <button
-                onClick={() => setMoveTargetFolderId(null)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "10px 10px",
-                  borderRadius: 10,
-                  border: moveTargetFolderId === null ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : border,
-                  background: cardBg,
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  color: fg,
-                }}
-              >
-                🧺 전체
-              </button>
+                <div style={{ height: 10 }} />
 
-              <div style={{ height: 10 }} />
+                {buildFolderTree(null, 0).map(({ f, depth }) => {
+                  const active = moveTargetFolderId === f.id;
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() => setMoveTargetFolderId(f.id)}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        padding: "10px 10px",
+                        borderRadius: 10,
+                        border: active ? "2px solid #111" : "1px solid #ddd",
+                        background: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                        marginTop: 8,
+                      }}
+                    >
+                      <span style={{ display: "inline-block", width: depth * 14 }} />
+                      📁 {f.name}
+                    </button>
+                  );
+                })}
+              </div>
 
-              {buildFolderTree(null, 0).map(({ f, depth }) => {
-                const active = moveTargetFolderId === f.id;
-                const marker = depth > 0 ? "↳ ".repeat(depth) : "";
-                return (
-                  <button
-                    key={f.id}
-                    onClick={() => setMoveTargetFolderId(f.id)}
-                    style={{
-                      width: "100%",
-                      textAlign: "left",
-                      padding: "10px 10px",
-                      borderRadius: 10,
-                      border: active ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : border,
-                      background: cardBg,
-                      cursor: "pointer",
-                      fontWeight: 900,
-                      marginTop: 8,
-                      color: fg,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
-                    <span style={{ opacity: depth > 0 ? 0.85 : 1, fontSize: 13, whiteSpace: "pre" }}>{marker}</span>
-                    <span style={{ whiteSpace: "pre" }}>📁</span>
-                    <span>{f.name}</span>
-                  </button>
-                );
-              })}
-            </div>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
+                <button
+                  onClick={() => setMovePickerOpen(false)}
+                  style={{
+                    height: 38,
+                    padding: "0 14px",
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: "#fff",
+                  }}
+                >
+                  취소
+                </button>
 
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
-              <button onClick={() => setMovePickerOpen(false)} style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}>
-                취소
-              </button>
-
-              <button
-                onClick={() => moveSelectedToFolder(moveTargetFolderId)}
-                disabled={selectedCount === 0}
-                style={{ height: 38, padding: "0 14px", borderRadius: 10, border, cursor: selectedCount > 0 ? "pointer" : "not-allowed", fontWeight: 900, background: "#111", color: "#fff", opacity: selectedCount > 0 ? 1 : 0.5 }}
-              >
-                이동 확정
-              </button>
+                <button
+                  onClick={() => moveSelectedToFolder(moveTargetFolderId)}
+                  disabled={selectedCount === 0}
+                  style={{
+                    height: 38,
+                    padding: "0 14px",
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                    cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                    fontWeight: 900,
+                    background: "#111",
+                    color: "#fff",
+                    opacity: selectedCount > 0 ? 1 : 0.5,
+                  }}
+                >
+                  이동 확정
+                </button>
+              </div>
             </div>
           </div>
+        )}
+
+        {/* Bottom Nav: 이전/복사/다음 */}
+        <div
+          style={{
+            position: "fixed",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: cardBg,
+            borderTop: cardBorder,
+            padding: "10px 12px",
+            zIndex: 9998,
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          <div style={{ maxWidth: 860, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <button
+              onClick={goPrev}
+              disabled={!canPrev}
+              style={{
+                height: 40,
+                padding: "0 14px",
+                borderRadius: 12,
+                border: cardBorder,
+                background: cardBg,
+                fontWeight: 900,
+                cursor: canPrev ? "pointer" : "not-allowed",
+                opacity: canPrev ? 1 : 0.5,
+                color: textColor,
+              }}
+            >
+              ◀ 이전
+            </button>
+
+            <button
+              onClick={() => handleCopy(resultBody || "")}
+              disabled={!resultBody.trim()}
+              style={{
+                height: 40,
+                padding: "0 14px",
+                borderRadius: 12,
+                border: cardBorder,
+                background: cardBg,
+                fontWeight: 900,
+                cursor: resultBody.trim() ? "pointer" : "not-allowed",
+                opacity: resultBody.trim() ? 1 : 0.5,
+                color: textColor,
+              }}
+            >
+              📋 복사
+            </button>
+
+            <button
+              onClick={goNext}
+              disabled={!canNext}
+              style={{
+                height: 40,
+                padding: "0 14px",
+                borderRadius: 12,
+                border: cardBorder,
+                background: cardBg,
+                fontWeight: 900,
+                cursor: canNext ? "pointer" : "not-allowed",
+                opacity: canNext ? 1 : 0.5,
+                color: textColor,
+              }}
+            >
+              다음 ▶
+            </button>
+          </div>
         </div>
-      )}
-
-      {/* Bottom Nav */}
-      <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, background: theme === "dark" ? "rgba(18,20,27,0.96)" : "rgba(255,255,255,0.96)", borderTop: theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd", padding: "10px 12px", zIndex: 9998 }}>
-        <div style={{ maxWidth: settings.containerMaxWidth, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
-          <button onClick={goPrev} disabled={!canPrev} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: canPrev ? "pointer" : "not-allowed", opacity: canPrev ? 1 : 0.5, color: fg }}>
-            ◀ 이전
-          </button>
-
-          <button onClick={() => handleCopy(resultBody || "")} disabled={!resultBody.trim()} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: resultBody.trim() ? "pointer" : "not-allowed", opacity: resultBody.trim() ? 1 : 0.5, color: fg }}>
-            📋 복사
-          </button>
-
-          <button onClick={goNext} disabled={!canNext} style={{ height: 40, padding: "0 14px", borderRadius: 12, border, background: cardBg, fontWeight: 900, cursor: canNext ? "pointer" : "not-allowed", opacity: canNext ? 1 : 0.5, color: fg }}>
-            다음 ▶
-          </button>
-        </div>
-      </div>
-    </main>
+      </main>
+    </div>
   );
 }
