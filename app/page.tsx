@@ -85,28 +85,26 @@ type FolderNode = {
 type ItemNode = {
   id: string;
   type: "item";
-  name: string; // 표시명(예: "패러디1 · 3화")
+  name: string; // 히스토리 표시명: "소설제목 · 제 N화"
   createdAt: number;
 
-  // 메타(자동 분류용 아님 / 표시용)
-  novelTitle: string;
-  seriesName: string;
+  // 메타(표시/헤더용)
+  seriesTitle: string; // 패러디/웹소설 큰 제목
   episodeIndex: number;
-  episodeLabel: string;
+  episodeSubtitle: string; // 부제목(없을 수 있음)
 
   sourceText: string;
-  translatedText: string;
+  translatedBody: string;
 
-  // ✅ 자동 저장/중복 방지 키 (같은 회차는 업데이트)
-  key: string; // novelTitle|seriesName|episodeIndex
+  // ✅ 중복 방지(같은 제목+회차면 최신 번역으로 업데이트)
+  key: string; // seriesTitle|episodeIndex
 };
 
 type TreeNode = FolderNode | ItemNode;
 
-const STORAGE_KEY = "parody_translator_history_v4"; // ✅ v4: 히스토리 + 드래그
-const ROOT_ID = "root";
-const HISTORY_ID = "history_root";
-const HISTORY_NAME = "히스토리";
+const STORAGE_KEY = "parody_translator_history_v5"; // v5: 히스토리 루트 단일 + 폴더명 수정 + 헤더(제목/회차/부제목)
+const ROOT_ID = "history_root";
+const ROOT_NAME = "히스토리";
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -115,15 +113,16 @@ function uid() {
 function loadTree(): FolderNode {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { id: ROOT_ID, type: "folder", name: "root", children: [] };
+    if (!raw) return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
 
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.type !== "folder" || !Array.isArray(parsed.children)) {
-      return { id: ROOT_ID, type: "folder", name: "root", children: [] };
+      return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
     }
-    return parsed as FolderNode;
+    // 루트 이름/ID 강제(이전 버전 데이터가 있어도 정합 유지)
+    return { ...(parsed as FolderNode), id: ROOT_ID, name: ROOT_NAME };
   } catch {
-    return { id: ROOT_ID, type: "folder", name: "root", children: [] };
+    return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
   }
 }
 
@@ -189,7 +188,7 @@ function extractNode(root: FolderNode, targetId: string): { nextRoot: FolderNode
 
 function findItemByKey(root: FolderNode, key: string): ItemNode | null {
   for (const child of root.children) {
-    if (child.type === "item" && child.key === key) return child as ItemNode;
+    if (child.type === "item" && (child as ItemNode).key === key) return child as ItemNode;
     if (child.type === "folder") {
       const found = findItemByKey(child, key);
       if (found) return found;
@@ -210,13 +209,23 @@ function replaceItemById(root: FolderNode, itemId: string, nextItem: ItemNode): 
   return helper(root);
 }
 
-function ensureHistoryFolder(root: FolderNode): FolderNode {
-  const exists = findNodeById(root, HISTORY_ID);
-  if (exists && exists.type === "folder") return root;
-
-  const history: FolderNode = { id: HISTORY_ID, type: "folder", name: HISTORY_NAME, children: [] };
-  // 히스토리는 루트 최상단에 고정
-  return { ...root, children: [history, ...root.children.filter((c) => c.id !== HISTORY_ID)] };
+function renameFolderById(root: FolderNode, folderId: string, nextName: string): FolderNode {
+  if (root.id === folderId) {
+    // 루트는 이름 고정
+    return root;
+  }
+  function helper(folder: FolderNode): FolderNode {
+    const nextChildren = folder.children.map((c) => {
+      if (c.type === "folder") {
+        const fc = c as FolderNode;
+        if (fc.id === folderId) return { ...fc, name: nextName };
+        return helper(fc);
+      }
+      return c;
+    });
+    return { ...folder, children: nextChildren };
+  }
+  return helper(root);
 }
 
 function formatDate(ts: number) {
@@ -230,14 +239,31 @@ function formatDate(ts: number) {
 }
 
 /** =========================
+ *  Header builder
+ *  ========================= */
+function buildEpisodeLine(episodeIndex: number, subtitle: string) {
+  const n = episodeIndex + 1;
+  const t = subtitle.trim();
+  return t ? `제 ${n}화 · ${t}` : `제 ${n}화`;
+}
+
+function buildFullText(seriesTitle: string, episodeIndex: number, subtitle: string, body: string) {
+  const title = seriesTitle.trim() || "제목 없음";
+  const episodeLine = buildEpisodeLine(episodeIndex, subtitle);
+  // 제목(1줄) + 빈줄(1) + 회차줄(1줄) + 빈줄(2) + 본문
+  return `${title}\n\n${episodeLine}\n\n\n${body.trim()}`;
+}
+
+/** =========================
  *  Page
  *  ========================= */
 export default function Page() {
-  /** ✅ 표시/키 생성용 메타 (자동 분류 X) */
-  const [novelTitle, setNovelTitle] = useState("코난패러디소설");
-  const [seriesName, setSeriesName] = useState("패러디1");
+  /** ✅ 패러디/웹소설 큰 제목(=시리즈 큰 제목) */
+  const [seriesTitle, setSeriesTitle] = useState("코난패러디소설");
+  /** ✅ 부제목(회차 설명) */
+  const [episodeSubtitle, setEpisodeSubtitle] = useState("");
 
-  /** ✅ 테스트용 회차 */
+  /** ✅ 테스트용 회차(나중에 실제 원문으로 교체) */
   const episodes = useMemo(
     () => [
       `Episode 1
@@ -269,34 +295,32 @@ Then a whisper: "You opened the door."`,
 
   const [episodeIndex, setEpisodeIndex] = useState(0);
   const [source, setSource] = useState(episodes[0] ?? "");
-  const [result, setResult] = useState("");
+  const [translatedBody, setTranslatedBody] = useState(""); // ✅ 본문만(화면 표시용)
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<Progress>(null);
 
-  // 회차별 번역 캐시
+  // ✅ 회차별 번역 캐시(본문만)
   const [translatedCache, setTranslatedCache] = useState<Record<number, string>>({});
   const abortRef = useRef<AbortController | null>(null);
 
-  // 기록/폴더 UI
+  // ✅ 기록/폴더 UI
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [tree, setTree] = useState<FolderNode>({ id: ROOT_ID, type: "folder", name: "root", children: [] });
-
-  // 이동/정리 대상 폴더
-  const [selectedFolderId, setSelectedFolderId] = useState<string>(HISTORY_ID);
-  const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({});
+  const [tree, setTree] = useState<FolderNode>({ id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] });
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(ROOT_ID); // 이동/정리 대상 폴더
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({ [ROOT_ID]: true });
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
-  // 드래그 상태(PC)
+  // ✅ 드래그(PC)
   const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
   const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
 
   useEffect(() => {
-    const loaded = ensureHistoryFolder(loadTree());
+    const loaded = loadTree();
     setTree(loaded);
-    setSelectedFolderId(HISTORY_ID);
-    setExpandedFolderIds((prev) => ({ ...prev, [HISTORY_ID]: true }));
+    setSelectedFolderId(ROOT_ID);
+    setExpandedFolderIds((prev) => ({ ...prev, [ROOT_ID]: true }));
   }, []);
 
   useEffect(() => {
@@ -330,20 +354,27 @@ Then a whisper: "You opened the door."`,
     abortRef.current?.abort();
   }
 
-  async function handleCopy() {
+  async function handleCopyFull() {
+    const full = buildFullText(seriesTitle, episodeIndex, episodeSubtitle, translatedBody);
     try {
-      await navigator.clipboard.writeText(result);
-      alert("번역본이 복사되었습니다.");
+      await navigator.clipboard.writeText(full);
+      alert("번역본(제목/회차/부제목+본문)이 복사되었습니다.");
     } catch {
       alert("복사에 실패했습니다. 브라우저 권한을 확인해주세요.");
     }
   }
 
-  /** ✅ 자동 저장: 번역 완료 시 “히스토리” 폴더 맨 위에 저장/업데이트 */
-  function autoSaveHistory(params: { episodeIndex: number; sourceText: string; translatedText: string }) {
-    const key = `${novelTitle}|${seriesName}|${params.episodeIndex}`;
-    const episodeLabel = `${params.episodeIndex + 1}화`;
-    const itemName = `${seriesName} · ${episodeLabel}`;
+  /** ✅ 자동 저장: 번역 완료 시 히스토리(루트)에 시간순으로 쌓임 / 같은 회차는 업데이트 */
+  function autoSaveHistory(params: {
+    episodeIndex: number;
+    sourceText: string;
+    translatedBody: string;
+    seriesTitle: string;
+    episodeSubtitle: string;
+  }) {
+    const key = `${params.seriesTitle.trim()}|${params.episodeIndex}`;
+
+    const itemName = `${params.seriesTitle.trim() || "제목 없음"} · 제 ${params.episodeIndex + 1}화`;
 
     const existing = findItemByKey(tree, key);
     if (existing) {
@@ -351,12 +382,11 @@ Then a whisper: "You opened the door."`,
         ...existing,
         name: itemName,
         createdAt: Date.now(),
-        novelTitle,
-        seriesName,
+        seriesTitle: params.seriesTitle,
         episodeIndex: params.episodeIndex,
-        episodeLabel,
+        episodeSubtitle: params.episodeSubtitle,
         sourceText: params.sourceText,
-        translatedText: params.translatedText,
+        translatedBody: params.translatedBody,
         key,
       };
       const nextTree = replaceItemById(tree, existing.id, nextItem);
@@ -369,16 +399,16 @@ Then a whisper: "You opened the door."`,
       type: "item",
       name: itemName,
       createdAt: Date.now(),
-      novelTitle,
-      seriesName,
+      seriesTitle: params.seriesTitle,
       episodeIndex: params.episodeIndex,
-      episodeLabel,
+      episodeSubtitle: params.episodeSubtitle,
       sourceText: params.sourceText,
-      translatedText: params.translatedText,
+      translatedBody: params.translatedBody,
       key,
     };
 
-    const nextTree = updateFolderChildren(tree, HISTORY_ID, (children) => [item, ...children]);
+    // ✅ 루트 맨 위에 추가(최신이 위)
+    const nextTree = updateFolderChildren(tree, ROOT_ID, (children) => [item, ...children]);
     setTree(nextTree);
   }
 
@@ -386,15 +416,16 @@ Then a whisper: "You opened the door."`,
     const trimmed = text.trim();
     if (!trimmed) return;
 
+    // ✅ 캐시가 있으면 즉시 표시(본문만)
     if (cacheKey !== undefined && translatedCache[cacheKey]) {
-      setResult(translatedCache[cacheKey]);
+      setTranslatedBody(translatedCache[cacheKey]);
       setError("");
       setProgress(null);
       return;
     }
 
     setIsLoading(true);
-    setResult("");
+    setTranslatedBody("");
     setError("");
 
     abortRef.current?.abort();
@@ -415,15 +446,21 @@ Then a whisper: "You opened the door."`,
         const translated = await translateOneChunk(chunks[i], controller.signal);
         if (!out) out = translated.trimEnd();
         else out += "\n\n" + translated.trimEnd();
-        setResult(out);
+        setTranslatedBody(out);
       }
 
       setProgress({ current: chunks.length, total: chunks.length });
-      setResult(out);
+      setTranslatedBody(out);
 
       if (cacheKey !== undefined) {
         setTranslatedCache((prev) => ({ ...prev, [cacheKey]: out }));
-        autoSaveHistory({ episodeIndex: cacheKey, sourceText: trimmed, translatedText: out });
+        autoSaveHistory({
+          episodeIndex: cacheKey,
+          sourceText: trimmed,
+          translatedBody: out,
+          seriesTitle,
+          episodeSubtitle,
+        });
       }
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -443,14 +480,14 @@ Then a whisper: "You opened the door."`,
     const nextText = episodes[nextIndex] ?? "";
     setEpisodeIndex(nextIndex);
     setSource(nextText);
-    setResult("");
+    setTranslatedBody("");
     setError("");
     setProgress(null);
-    void runTranslation(nextText, nextIndex); // ✅ 이동 시 자동 번역 + 자동저장
+    void runTranslation(nextText, nextIndex); // ✅ 다음/이전화 누르면 자동 번역 + 자동저장
   }
 
   /** =========================
-   *  Folder actions (정리용)
+   *  Folder actions
    *  ========================= */
   function toggleExpand(folderId: string) {
     setExpandedFolderIds((prev) => ({ ...prev, [folderId]: !prev[folderId] }));
@@ -460,15 +497,40 @@ Then a whisper: "You opened the door."`,
     const trimmed = name.trim();
     if (!trimmed) return;
 
-    const newFolder: FolderNode = { id: uid(), type: "folder", name: trimmed, children: [] };
+    const newFolder: FolderNode = {
+      id: uid(),
+      type: "folder",
+      name: trimmed,
+      children: [],
+    };
+
     const nextTree = updateFolderChildren(tree, parentFolderId, (children) => [...children, newFolder]);
     setTree(nextTree);
     setExpandedFolderIds((prev) => ({ ...prev, [parentFolderId]: true, [newFolder.id]: true }));
   }
 
+  function renameFolder(folderId: string) {
+    if (folderId === ROOT_ID) return;
+    const node = findNodeById(tree, folderId);
+    if (!node || node.type !== "folder") return;
+
+    const current = node.name;
+    const next = prompt("폴더 이름을 수정하세요:", current);
+    if (next === null) return;
+
+    const trimmed = next.trim();
+    if (!trimmed) {
+      alert("이름은 비워둘 수 없어요.");
+      return;
+    }
+
+    const nextTree = renameFolderById(tree, folderId, trimmed);
+    setTree(nextTree);
+  }
+
   function moveSelectedItemToFolder(targetFolderId: string) {
     if (!selectedItemId) {
-      alert("이동할 항목(○)을 먼저 선택해 주세요.");
+      alert("이동할 항목을 먼저 선택해 주세요.");
       return;
     }
     const target = findNodeById(tree, targetFolderId);
@@ -499,7 +561,8 @@ Then a whisper: "You opened the door."`,
   }
 
   function deleteNodeById(nodeId: string) {
-    if (nodeId === ROOT_ID || nodeId === HISTORY_ID) return;
+    if (nodeId === ROOT_ID) return;
+
     const ok = confirm("삭제할까요? (폴더면 안의 항목도 함께 삭제됩니다)");
     if (!ok) return;
 
@@ -510,11 +573,13 @@ Then a whisper: "You opened the door."`,
 
   function loadItemToViewer(item: ItemNode) {
     setEpisodeIndex(item.episodeIndex);
+    setSeriesTitle(item.seriesTitle);
+    setEpisodeSubtitle(item.episodeSubtitle);
     setSource(item.sourceText);
-    setResult(item.translatedText);
+    setTranslatedBody(item.translatedBody);
     setError("");
     setProgress(null);
-    setTranslatedCache((prev) => ({ ...prev, [item.episodeIndex]: item.translatedText }));
+    setTranslatedCache((prev) => ({ ...prev, [item.episodeIndex]: item.translatedBody }));
     setIsHistoryOpen(false);
   }
 
@@ -544,7 +609,7 @@ Then a whisper: "You opened the door."`,
             gap: 8,
             padding: "6px 8px",
             marginLeft: depth * 12,
-            borderRadius: 8,
+            borderRadius: 10,
             background: selectedFolderId === folder.id ? "rgba(0,0,0,0.06)" : "transparent",
             outline: isDropOver ? "2px dashed #888" : "none",
             outlineOffset: 2,
@@ -577,28 +642,44 @@ Then a whisper: "You opened the door."`,
             }}
             title="정리(이동/생성) 대상 폴더 선택"
           >
-            📁 {folder.name}
+            📁 {folder.id === ROOT_ID ? ROOT_NAME : folder.name}
           </button>
 
-          {folder.id !== HISTORY_ID && (
-            <button
-              onClick={() => deleteNodeById(folder.id)}
-              style={{
-                width: 34,
-                height: 28,
-                borderRadius: 8,
-                border: "1px solid #ddd",
-                cursor: "pointer",
-              }}
-              title="폴더 삭제"
-            >
-              🗑
-            </button>
+          {folder.id !== ROOT_ID && (
+            <>
+              <button
+                onClick={() => renameFolder(folder.id)}
+                style={{
+                  width: 34,
+                  height: 28,
+                  borderRadius: 8,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                }}
+                title="폴더 이름 수정"
+              >
+                ✏️
+              </button>
+
+              <button
+                onClick={() => deleteNodeById(folder.id)}
+                style={{
+                  width: 34,
+                  height: 28,
+                  borderRadius: 8,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                }}
+                title="폴더 삭제"
+              >
+                🗑
+              </button>
+            </>
           )}
         </div>
 
         {isExpanded && (
-          <div style={{ marginTop: 4 }}>
+          <div style={{ marginTop: 6 }}>
             {folder.children.length === 0 ? (
               <div style={{ marginLeft: depth * 12 + 44, opacity: 0.6, fontSize: 13, padding: "4px 0" }}>(비어 있음)</div>
             ) : (
@@ -619,7 +700,7 @@ Then a whisper: "You opened the door."`,
                       alignItems: "center",
                       padding: "6px 8px",
                       marginLeft: (depth + 1) * 12 + 32,
-                      borderRadius: 8,
+                      borderRadius: 10,
                       border: isSelected ? "2px solid #888" : "1px solid #eee",
                       background: "#fff",
                     }}
@@ -677,15 +758,16 @@ Then a whisper: "You opened the door."`,
                     >
                       <div style={{ fontWeight: 900 }}>{item.name}</div>
                       <div style={{ fontSize: 12, opacity: 0.65 }}>
-                        {item.novelTitle}/{item.seriesName} · {formatDate(item.createdAt)}
+                        {formatDate(item.createdAt)} · {buildEpisodeLine(item.episodeIndex, item.episodeSubtitle)}
                       </div>
                     </button>
 
                     <button
                       onClick={() => {
+                        const full = buildFullText(item.seriesTitle, item.episodeIndex, item.episodeSubtitle, item.translatedBody);
                         navigator.clipboard
-                          .writeText(item.translatedText)
-                          .then(() => alert("저장된 번역본을 복사했어요."))
+                          .writeText(full)
+                          .then(() => alert("저장된 번역본(헤더 포함)을 복사했어요."))
                           .catch(() => alert("복사 실패(권한 확인)"));
                       }}
                       style={{
@@ -696,7 +778,7 @@ Then a whisper: "You opened the door."`,
                         cursor: "pointer",
                         fontWeight: 900,
                       }}
-                      title="저장본 복사"
+                      title="저장본 복사(헤더 포함)"
                     >
                       📋
                     </button>
@@ -724,30 +806,19 @@ Then a whisper: "You opened the door."`,
     );
   }
 
+  const episodeLine = buildEpisodeLine(episodeIndex, episodeSubtitle);
+  const fullTextForCopy = translatedBody.trim()
+    ? buildFullText(seriesTitle, episodeIndex, episodeSubtitle, translatedBody)
+    : "";
+
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
       {/* 상단 바 */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
         <div style={{ flex: 1 }}>
-          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
-          <div style={{ opacity: 0.75, marginTop: 6, fontSize: 13 }}>
-            자동 저장: <b>📁 {HISTORY_NAME}</b>에 시간순으로 쌓임 · 현재 회차: <b>{episodeIndex + 1}/{episodes.length}</b>
-          </div>
-
-          {/* 메타 입력(자동 분류 X, 중복방지/표시용) */}
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-            <input
-              value={novelTitle}
-              onChange={(e) => setNovelTitle(e.target.value)}
-              placeholder="원작/작품명(표시용)"
-              style={{ height: 38, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 220 }}
-            />
-            <input
-              value={seriesName}
-              onChange={(e) => setSeriesName(e.target.value)}
-              placeholder="시리즈명(표시용)"
-              style={{ height: 38, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 180 }}
-            />
+          <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
+          <div style={{ opacity: 0.7, marginTop: 6, fontSize: 13 }}>
+            번역하면 <b>히스토리</b>에 자동 저장됩니다 · {episodeIndex + 1}/{episodes.length}화
           </div>
         </div>
 
@@ -756,11 +827,27 @@ Then a whisper: "You opened the door."`,
           style={{ height: 40, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, marginTop: 2 }}
           title="번역 기록"
         >
-          🗂 기록
+          🗂 히스토리
         </button>
       </div>
 
-      <div style={{ opacity: 0.75, marginBottom: 12 }}>
+      {/* 메타 입력(제목/부제목) */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input
+          value={seriesTitle}
+          onChange={(e) => setSeriesTitle(e.target.value)}
+          placeholder="패러디/웹소설 제목(큰 제목)"
+          style={{ height: 40, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 280 }}
+        />
+        <input
+          value={episodeSubtitle}
+          onChange={(e) => setEpisodeSubtitle(e.target.value)}
+          placeholder="부제목(선택)"
+          style={{ height: 40, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 220 }}
+        />
+      </div>
+
+      <div style={{ opacity: 0.75, marginBottom: 12, fontSize: 13 }}>
         예상 분할: {chunksPreview.chunksCount}조각 · 글자수: {chunksPreview.totalChars.toLocaleString()}자
       </div>
 
@@ -807,26 +894,41 @@ Then a whisper: "You opened the door."`,
 
         {error && <div style={{ color: "#c00", fontSize: 14 }}>{error}</div>}
 
-        {/* 결과 */}
-        <textarea
-          value={result}
-          readOnly
-          placeholder="번역 결과가 여기 표시됩니다…"
+        {/* ✅ 결과 헤더(클로모 느낌) */}
+        <div
           style={{
-            width: "100%",
-            minHeight: 240,
-            padding: 12,
-            fontSize: 14,
-            borderRadius: 10,
             border: "1px solid #ddd",
-            outline: "none",
+            borderRadius: 12,
+            padding: 14,
             background: "#fafafa",
-            whiteSpace: "pre-wrap",
           }}
-        />
+        >
+          <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.25 }}>{seriesTitle.trim() || "제목 없음"}</div>
+          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>{episodeLine}</div>
+
+          {/* 본문 시작 전 여백 충분히 */}
+          <div style={{ height: 16 }} />
+
+          <textarea
+            value={translatedBody}
+            readOnly
+            placeholder="번역 결과(본문)가 여기 표시됩니다…"
+            style={{
+              width: "100%",
+              minHeight: 240,
+              padding: 12,
+              fontSize: 14,
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              outline: "none",
+              background: "#fff",
+              whiteSpace: "pre-wrap",
+            }}
+          />
+        </div>
 
         {/* 하단 네비 + 복사 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
           <button
             onClick={() => goToEpisode(episodeIndex - 1)}
             disabled={!hasPrev || isLoading}
@@ -844,17 +946,17 @@ Then a whisper: "You opened the door."`,
           </button>
 
           <button
-            onClick={handleCopy}
-            disabled={!result.trim()}
-            title="번역본 복사"
+            onClick={handleCopyFull}
+            disabled={!fullTextForCopy}
+            title="번역본 복사(제목/회차/부제목+본문)"
             style={{
               height: 42,
               width: 48,
               borderRadius: 10,
               border: "1px solid #ddd",
-              cursor: !result.trim() ? "not-allowed" : "pointer",
+              cursor: !fullTextForCopy ? "not-allowed" : "pointer",
               fontWeight: 900,
-              opacity: !result.trim() ? 0.5 : 1,
+              opacity: !fullTextForCopy ? 0.5 : 1,
             }}
           >
             📋
@@ -911,9 +1013,9 @@ Then a whisper: "You opened the door."`,
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>번역 기록</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  번역하면 <b>📁 {HISTORY_NAME}</b>에 자동 저장됨. (PC는 아이템을 “≡”으로 드래그해서 폴더에 드롭 가능)
+                  1) 번역하면 시간순으로 쌓임 → 2) 폴더 생성 → 3) 항목 선택(○) 후 “선택 폴더로 이동” 또는 드래그(≡)
                 </div>
               </div>
 
@@ -956,8 +1058,8 @@ Then a whisper: "You opened the door."`,
                 <b>
                   {(() => {
                     const n = findNodeById(tree, selectedFolderId);
-                    if (!n || n.type !== "folder") return HISTORY_NAME;
-                    return n.name;
+                    if (!n || n.type !== "folder") return ROOT_NAME;
+                    return n.id === ROOT_ID ? ROOT_NAME : n.name;
                   })()}
                 </b>
                 {" · "}
@@ -965,15 +1067,12 @@ Then a whisper: "You opened the door."`,
               </div>
             </div>
 
-            {/* 트리: root는 숨기고 children만 */}
-            {tree.children
-              .filter((c) => c.type === "folder")
-              .map((c) => (
-                <FolderTree key={c.id} folder={c as FolderNode} depth={0} />
-              ))}
+            {/* 트리(루트 = 히스토리만) */}
+            <FolderTree folder={tree} depth={0} />
           </div>
         </div>
       )}
     </main>
   );
 }
+```0
