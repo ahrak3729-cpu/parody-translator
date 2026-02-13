@@ -51,11 +51,11 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // ✅ 본문만 저장 (헤더는 showHeader로 표시만)
+  translatedText: string; // 본문만 저장
   url?: string;
 
   folderId?: string | null;
-  showHeader?: boolean; // url 번역이면 true, 수동은 false
+  showHeader?: boolean; // 저장 당시 보여줬는지
 };
 
 type HistoryFolder = {
@@ -63,6 +63,31 @@ type HistoryFolder = {
   createdAt: number;
   name: string;
   parentId: string | null;
+};
+
+type AppSettings = {
+  // Viewer
+  fontSize: number; // px
+  lineHeight: number; // CSS number
+  containerMaxWidth: number; // px
+
+  // Header rules
+  showHeaderForUrl: boolean;
+  showHeaderForManual: boolean;
+
+  // Theme
+  theme: "light" | "dark";
+};
+
+const DEFAULT_SETTINGS: AppSettings = {
+  fontSize: 16,
+  lineHeight: 1.7,
+  containerMaxWidth: 860,
+
+  showHeaderForUrl: true,
+  showHeaderForManual: false,
+
+  theme: "light",
 };
 
 function uid() {
@@ -102,12 +127,13 @@ async function safeReadJson(res: Response) {
 
 /* =========================
    IndexedDB (영구 저장)
-   - localStorage 완전 제거 버전
 ========================= */
 const DB_NAME = "parody_translator_db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_HISTORY = "history";
 const STORE_FOLDERS = "folders";
+const STORE_SETTINGS = "settings";
+const SETTINGS_KEY = "app_settings_singleton";
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -121,6 +147,9 @@ function openDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_FOLDERS)) {
         db.createObjectStore(STORE_FOLDERS, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORE_SETTINGS)) {
+        db.createObjectStore(STORE_SETTINGS, { keyPath: "key" });
       }
     };
 
@@ -157,6 +186,28 @@ async function dbReplaceAll<T extends { id: string }>(storeName: string, items: 
   });
 }
 
+async function dbGetSettings(): Promise<AppSettings | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SETTINGS, "readonly");
+    const store = tx.objectStore(STORE_SETTINGS);
+    const req = store.get(SETTINGS_KEY);
+    req.onsuccess = () => resolve((req.result?.value as AppSettings) ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbSaveSettings(value: AppSettings): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SETTINGS, "readwrite");
+    const store = tx.objectStore(STORE_SETTINGS);
+    store.put({ key: SETTINGS_KEY, value });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 /* =========================
    작은 메뉴 버튼
 ========================= */
@@ -183,7 +234,17 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
   );
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
 export default function Page() {
+  /* =========================
+     Settings
+  ========================= */
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   /* =========================
      URL 중심
   ========================= */
@@ -223,13 +284,13 @@ export default function Page() {
   const [folders, setFolders] = useState<HistoryFolder[]>([]);
 
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // 전체(null) 또는 현재 폴더
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
-  // ✅ + 메뉴 팝업(모달 잘림 방지 fixed)
+  // + 메뉴 팝업
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null);
 
-  // ✅ 파일 선택 모드
+  // 파일 선택 모드
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
 
@@ -241,9 +302,6 @@ export default function Page() {
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
 
-  // ✅ 설정 아이콘(옆 배치 요청 반영)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
   /* =========================
      최초 로드: IndexedDB → state
   ========================= */
@@ -252,22 +310,24 @@ export default function Page() {
 
     (async () => {
       try {
-        const [h, f] = await Promise.all([
+        const [h, f, s] = await Promise.all([
           dbGetAll<HistoryItem>(STORE_HISTORY),
           dbGetAll<HistoryFolder>(STORE_FOLDERS),
+          dbGetSettings(),
         ]);
 
         if (!alive) return;
 
         const nextHistory = (h || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
         const nextFolders = (f || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+        const nextSettings = s ? { ...DEFAULT_SETTINGS, ...s } : DEFAULT_SETTINGS;
 
         setHistory(nextHistory);
         setFolders(nextFolders);
+        setSettings(nextSettings);
 
         setCurrentHistoryId(nextHistory[0]?.id ?? null);
       } catch (e: any) {
-        // DB 접근 실패해도 앱은 죽지 않게
         console.error(e);
         setError("저장소(IndexedDB) 로드에 실패했어요. 브라우저 설정을 확인해줘.");
       }
@@ -277,6 +337,21 @@ export default function Page() {
       alive = false;
     };
   }, []);
+
+  async function updateSettings(patch: Partial<AppSettings>) {
+    const next: AppSettings = { ...settings, ...patch };
+    setSettings(next);
+    try {
+      await dbSaveSettings(next);
+    } catch (e) {
+      console.error(e);
+      alert("설정 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
+    }
+  }
+
+  async function resetSettings() {
+    await updateSettings(DEFAULT_SETTINGS);
+  }
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
@@ -427,7 +502,7 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       name: trimmed,
-      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성 (폴더 안 폴더 OK)
+      parentId: selectedFolderId,
     };
 
     const next = [...folders, f].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
@@ -536,17 +611,40 @@ export default function Page() {
     disableSelectMode();
   }
 
+  function inferHeaderForItem(it: HistoryItem) {
+    return it.url ? settings.showHeaderForUrl : settings.showHeaderForManual;
+  }
+
   function loadHistoryItem(it: HistoryItem) {
     setSeriesTitle(it.seriesTitle);
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
     setResultBody(it.translatedText || "");
-    setShowHeader(!!it.showHeader);
+
+    const inferred = inferHeaderForItem(it);
+    setShowHeader(typeof it.showHeader === "boolean" ? it.showHeader : inferred);
+
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
     setHistoryOpen(false);
+  }
+
+  async function toggleHeaderForHistoryItem(id: string) {
+    const it = history.find((x) => x.id === id);
+    if (!it) return;
+
+    const current = typeof it.showHeader === "boolean" ? it.showHeader : inferHeaderForItem(it);
+    const nextValue = !current;
+
+    const next = history.map((h) => (h.id === id ? { ...h, showHeader: nextValue } : h));
+    await persistHistory(next);
+
+    // 현재 화면에 로드된 항목이면 즉시 반영
+    if (currentHistoryId === id) {
+      setShowHeader(nextValue);
+    }
   }
 
   async function handleCopy(text: string) {
@@ -654,7 +752,7 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      const nextShowHeader = mode === "url"; // ✅ URL만 헤더 표시
+      const nextShowHeader = mode === "url" ? settings.showHeaderForUrl : settings.showHeaderForManual;
       setShowHeader(nextShowHeader);
 
       await autoSaveToHistory({
@@ -723,21 +821,42 @@ export default function Page() {
   }
 
   /* =========================
-     + 메뉴 앵커 계산 (모달 잘림 방지)
+     + 메뉴 앵커 계산
   ========================= */
   function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
     const right = Math.max(12, window.innerWidth - rect.right);
-    const bottom = Math.max(12, window.innerHeight - rect.top); // 버튼 위로 메뉴
+    const bottom = Math.max(12, window.innerHeight - rect.top);
     setMenuAnchor({ right, bottom });
     setMenuOpen(true);
   }
 
   /* =========================
+     Theme colors
+  ========================= */
+  const theme = settings.theme;
+  const bg = theme === "dark" ? "#0b0c10" : "#ffffff";
+  const fg = theme === "dark" ? "#f2f4f8" : "#111111";
+  const cardBg = theme === "dark" ? "#12141b" : "#ffffff";
+  const border = theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd";
+  const subtleBorder = theme === "dark" ? "1px solid #222733" : "1px solid #eee";
+  const overlay = "rgba(0,0,0,0.35)";
+
+  /* =========================
      UI
   ========================= */
   return (
-    <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86 }}>
+    <main
+      style={{
+        maxWidth: settings.containerMaxWidth,
+        margin: "0 auto",
+        padding: 24,
+        paddingBottom: 86,
+        background: bg,
+        color: fg,
+        minHeight: "100vh",
+      }}
+    >
       {/* 상단바 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
         <div>
@@ -758,11 +877,12 @@ export default function Page() {
               width: 44,
               height: 40,
               borderRadius: 12,
-              border: "1px solid #ddd",
+              border,
               cursor: "pointer",
               fontWeight: 900,
-              background: "#fff",
+              background: cardBg,
               fontSize: 18,
+              color: fg,
             }}
             title="히스토리"
             aria-label="히스토리"
@@ -770,18 +890,19 @@ export default function Page() {
             ☰
           </button>
 
-          {/* ✅ 설정 아이콘(요청대로 히스토리 옆) */}
+          {/* 설정 아이콘 */}
           <button
             onClick={() => setSettingsOpen(true)}
             style={{
               width: 44,
               height: 40,
               borderRadius: 12,
-              border: "1px solid #ddd",
+              border,
               cursor: "pointer",
               fontWeight: 900,
-              background: "#fff",
+              background: cardBg,
               fontSize: 18,
+              color: fg,
             }}
             title="설정"
             aria-label="설정"
@@ -797,7 +918,14 @@ export default function Page() {
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="URL 붙여넣기"
-          style={{ flex: 1, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
+          style={{
+            flex: 1,
+            padding: 10,
+            borderRadius: 10,
+            border,
+            background: cardBg,
+            color: fg,
+          }}
         />
         <button
           onClick={fetchFromUrl}
@@ -806,11 +934,12 @@ export default function Page() {
             height: 40,
             padding: "0 12px",
             borderRadius: 10,
-            border: "1px solid #ddd",
+            border,
             cursor: isFetchingUrl || !url.trim() ? "not-allowed" : "pointer",
             fontWeight: 900,
-            background: "#fff",
+            background: cardBg,
             opacity: isFetchingUrl || !url.trim() ? 0.6 : 1,
+            color: fg,
           }}
         >
           {isFetchingUrl ? "불러오는 중…" : "본문 불러오기"}
@@ -831,8 +960,10 @@ export default function Page() {
               minHeight: 160,
               padding: 12,
               borderRadius: 10,
-              border: "1px solid #ddd",
+              border,
               whiteSpace: "pre-wrap",
+              background: cardBg,
+              color: fg,
             }}
           />
 
@@ -844,11 +975,12 @@ export default function Page() {
                 height: 40,
                 padding: "0 12px",
                 borderRadius: 10,
-                border: "1px solid #ddd",
+                border,
                 cursor: isLoading || !source.trim() ? "not-allowed" : "pointer",
                 fontWeight: 900,
-                background: "#fff",
+                background: cardBg,
                 opacity: isLoading || !source.trim() ? 0.6 : 1,
+                color: fg,
               }}
             >
               {isLoading ? "번역 중…" : "번역하기"}
@@ -861,10 +993,11 @@ export default function Page() {
                   height: 40,
                   padding: "0 12px",
                   borderRadius: 10,
-                  border: "1px solid #ddd",
+                  border,
                   cursor: "pointer",
                   fontWeight: 900,
-                  background: "#fff",
+                  background: cardBg,
+                  color: fg,
                 }}
               >
                 취소
@@ -880,7 +1013,7 @@ export default function Page() {
         </div>
       </details>
 
-      {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
+      {error && <div style={{ color: "#ff4d4f", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
 
       {/* 결과 Viewer */}
       <div style={{ marginTop: 14 }}>
@@ -888,13 +1021,14 @@ export default function Page() {
 
         <div
           style={{
-            border: "1px solid #ddd",
+            border,
             borderRadius: 14,
             padding: 16,
-            background: "#fff",
+            background: cardBg,
             minHeight: 240,
             whiteSpace: "pre-wrap",
-            lineHeight: 1.7,
+            lineHeight: settings.lineHeight,
+            color: fg,
           }}
         >
           {!resultBody.trim() ? (
@@ -907,14 +1041,14 @@ export default function Page() {
                   <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
                 </>
               )}
-              <div style={{ fontSize: 16 }}>{resultBody}</div>
+              <div style={{ fontSize: settings.fontSize }}>{resultBody}</div>
             </>
           )}
         </div>
       </div>
 
       {/* =========================
-          Settings Modal (일단 틀만)
+          Settings Modal
          ========================= */}
       {settingsOpen && (
         <div
@@ -923,7 +1057,7 @@ export default function Page() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.35)",
+            background: overlay,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -937,9 +1071,10 @@ export default function Page() {
               width: "min(720px, 100%)",
               maxHeight: "80vh",
               overflow: "auto",
-              background: "#fff",
+              background: cardBg,
+              color: fg,
               borderRadius: 14,
-              border: "1px solid #ddd",
+              border,
               padding: 14,
             }}
             onClick={(e) => e.stopPropagation()}
@@ -948,13 +1083,154 @@ export default function Page() {
               <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
               <button
                 onClick={() => setSettingsOpen(false)}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
               >
                 닫기
               </button>
             </div>
-            <div style={{ marginTop: 10, opacity: 0.75, lineHeight: 1.6 }}>
-              (여기는 다음 단계에서 폰트/글자크기/배경이미지 URL 같은 “보기 서식” 옵션을 넣는 자리로 비워뒀어.)
+
+            {/* Theme */}
+            <div style={{ marginTop: 14, border: subtleBorder, borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>테마</div>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <button
+                  onClick={() => updateSettings({ theme: "light" })}
+                  style={{
+                    height: 36,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: settings.theme === "light" ? "#111" : cardBg,
+                    color: settings.theme === "light" ? "#fff" : fg,
+                  }}
+                >
+                  라이트
+                </button>
+                <button
+                  onClick={() => updateSettings({ theme: "dark" })}
+                  style={{
+                    height: 36,
+                    padding: "0 12px",
+                    borderRadius: 10,
+                    border,
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: settings.theme === "dark" ? "#111" : cardBg,
+                    color: settings.theme === "dark" ? "#fff" : fg,
+                  }}
+                >
+                  다크
+                </button>
+              </div>
+            </div>
+
+            {/* Viewer */}
+            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>번역 결과 보기</div>
+
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>글자 크기: {settings.fontSize}px</div>
+                <input
+                  type="range"
+                  min={14}
+                  max={22}
+                  value={settings.fontSize}
+                  onChange={(e) => updateSettings({ fontSize: clamp(Number(e.target.value), 14, 22) })}
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>줄 간격: {settings.lineHeight.toFixed(1)}</div>
+                <input
+                  type="range"
+                  min={14}
+                  max={22}
+                  value={Math.round(settings.lineHeight * 10)}
+                  onChange={(e) => updateSettings({ lineHeight: clamp(Number(e.target.value) / 10, 1.4, 2.2) })}
+                  style={{ width: "100%" }}
+                />
+              </div>
+
+              <div style={{ marginTop: 14 }}>
+                <div style={{ fontWeight: 800, marginBottom: 6 }}>전체 폭: {settings.containerMaxWidth}px</div>
+                <input
+                  type="range"
+                  min={680}
+                  max={980}
+                  step={10}
+                  value={settings.containerMaxWidth}
+                  onChange={(e) => updateSettings({ containerMaxWidth: clamp(Number(e.target.value), 680, 980) })}
+                  style={{ width: "100%" }}
+                />
+              </div>
+            </div>
+
+            {/* Header rules */}
+            <div style={{ marginTop: 12, border: subtleBorder, borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 900, marginBottom: 10 }}>헤더 표시 규칙</div>
+
+              <label style={{ display: "flex", gap: 10, alignItems: "center", cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="checkbox"
+                  checked={settings.showHeaderForUrl}
+                  onChange={(e) => updateSettings({ showHeaderForUrl: e.target.checked })}
+                  style={{ width: 18, height: 18 }}
+                />
+                <span style={{ fontWeight: 800 }}>URL 번역 결과에 큰제목/회차 표시</span>
+              </label>
+
+              <div style={{ height: 10 }} />
+
+              <label style={{ display: "flex", gap: 10, alignItems: "center", cursor: "pointer", userSelect: "none" }}>
+                <input
+                  type="checkbox"
+                  checked={settings.showHeaderForManual}
+                  onChange={(e) => updateSettings({ showHeaderForManual: e.target.checked })}
+                  style={{ width: 18, height: 18 }}
+                />
+                <span style={{ fontWeight: 800 }}>수동 번역 결과에 큰제목/회차 표시</span>
+              </label>
+
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75, lineHeight: 1.5 }}>
+                ※ 히스토리 항목별로는 목록의 🏷 버튼으로 개별 토글 가능.
+              </div>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 14 }}>
+              <button
+                onClick={resetSettings}
+                style={{
+                  height: 38,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: cardBg,
+                  color: fg,
+                }}
+              >
+                설정 초기화
+              </button>
+
+              <button
+                onClick={() => setSettingsOpen(false)}
+                style={{
+                  height: 38,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border,
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: "#111",
+                  color: "#fff",
+                }}
+              >
+                닫기
+              </button>
             </div>
           </div>
         </div>
@@ -970,7 +1246,7 @@ export default function Page() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.35)",
+            background: overlay,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -989,9 +1265,10 @@ export default function Page() {
               width: "min(920px, 100%)",
               maxHeight: "85vh",
               overflow: "auto",
-              background: "#fff",
+              background: cardBg,
+              color: fg,
               borderRadius: 14,
-              border: "1px solid #ddd",
+              border,
               padding: 14,
               position: "relative",
             }}
@@ -1002,7 +1279,6 @@ export default function Page() {
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>목록</div>
 
-                {/* 상태줄 */}
                 <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                   <span>
                     현재 폴더: <b>{breadcrumbText}</b>
@@ -1015,10 +1291,11 @@ export default function Page() {
                         width: 32,
                         height: 28,
                         borderRadius: 10,
-                        border: "1px solid #ddd",
-                        background: "#fff",
+                        border,
+                        background: cardBg,
                         cursor: "pointer",
                         fontWeight: 900,
+                        color: fg,
                       }}
                       title="폴더 이름 수정"
                     >
@@ -1037,13 +1314,13 @@ export default function Page() {
                   setMenuAnchor(null);
                   disableSelectMode();
                 }}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
               >
                 닫기
               </button>
             </div>
 
-            {/* 상단: 전체/뒤로(아이콘만) */}
+            {/* 상단: 전체/뒤로 */}
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <button
                 onClick={() => {
@@ -1055,9 +1332,9 @@ export default function Page() {
                   height: 34,
                   padding: "0 12px",
                   borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: selectedFolderId === null ? "#111" : "#fff",
-                  color: selectedFolderId === null ? "#fff" : "#111",
+                  border,
+                  background: selectedFolderId === null ? "#111" : cardBg,
+                  color: selectedFolderId === null ? "#fff" : fg,
                   cursor: "pointer",
                   fontWeight: 900,
                 }}
@@ -1072,11 +1349,12 @@ export default function Page() {
                   width: 44,
                   height: 34,
                   borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: "#fff",
+                  border,
+                  background: cardBg,
                   cursor: selectedFolderId === null ? "not-allowed" : "pointer",
                   fontWeight: 900,
                   opacity: selectedFolderId === null ? 0.5 : 1,
+                  color: fg,
                 }}
                 title="상위 폴더"
               >
@@ -1102,10 +1380,11 @@ export default function Page() {
                         height: 34,
                         padding: "0 12px",
                         borderRadius: 999,
-                        border: "1px solid #ddd",
-                        background: "#fff",
+                        border,
+                        background: cardBg,
                         cursor: "pointer",
                         fontWeight: 900,
+                        color: fg,
                       }}
                     >
                       📁 {f.name}
@@ -1124,14 +1403,16 @@ export default function Page() {
                     const label = `${it.seriesTitle} · ${it.episodeNo}화`;
                     const checked = !!selectedIds[it.id];
 
+                    const effectiveHeader = typeof it.showHeader === "boolean" ? it.showHeader : inferHeaderForItem(it);
+
                     return (
                       <div
                         key={it.id}
                         style={{
-                          border: selectMode && checked ? "2px solid #111" : "1px solid #eee",
+                          border: selectMode && checked ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : subtleBorder,
                           borderRadius: 12,
                           padding: 12,
-                          background: "#fff",
+                          background: cardBg,
                           display: "flex",
                           gap: 10,
                           alignItems: "center",
@@ -1161,14 +1442,40 @@ export default function Page() {
                             background: "transparent",
                             cursor: "pointer",
                             textAlign: "left",
+                            color: fg,
                           }}
                           title={selectMode ? "선택/해제" : "불러오기"}
                         >
-                          <div style={{ fontWeight: 900 }}>{label}</div>
-                          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
+                          <div style={{ fontWeight: 900, display: "flex", gap: 8, alignItems: "center" }}>
+                            <span>{label}</span>
+                            <span style={{ fontSize: 12, opacity: 0.7 }}>
+                              {effectiveHeader ? "· 헤더 ON" : "· 헤더 OFF"}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
                             {formatDate(it.createdAt)}
                             {it.url ? ` · URL 저장됨` : ""}
                           </div>
+                        </button>
+
+                        {/* ✅ 항목별 헤더 토글 */}
+                        <button
+                          onClick={() => toggleHeaderForHistoryItem(it.id)}
+                          style={{
+                            width: 46,
+                            height: 34,
+                            borderRadius: 10,
+                            border,
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            background: cardBg,
+                            color: fg,
+                            opacity: 1,
+                          }}
+                          title="이 항목의 헤더 표시 토글"
+                          aria-label="헤더 표시 토글"
+                        >
+                          🏷
                         </button>
 
                         <button
@@ -1177,10 +1484,11 @@ export default function Page() {
                             width: 46,
                             height: 34,
                             borderRadius: 10,
-                            border: "1px solid #ddd",
+                            border,
                             cursor: "pointer",
                             fontWeight: 900,
-                            background: "#fff",
+                            background: cardBg,
+                            color: fg,
                           }}
                           title="번역본 복사"
                         >
@@ -1197,10 +1505,10 @@ export default function Page() {
                     style={{
                       position: "sticky",
                       bottom: 0,
-                      background: "#fff",
+                      background: cardBg,
                       paddingTop: 10,
                       paddingBottom: 10,
-                      borderTop: "1px solid #eee",
+                      borderTop: subtleBorder,
                       display: "flex",
                       justifyContent: "center",
                       gap: 6,
@@ -1217,11 +1525,11 @@ export default function Page() {
                             height: 32,
                             padding: "0 10px",
                             borderRadius: 10,
-                            border: "1px solid #ddd",
+                            border,
                             cursor: "pointer",
                             fontWeight: 900,
-                            background: active ? "#111" : "#fff",
-                            color: active ? "#fff" : "#111",
+                            background: active ? "#111" : cardBg,
+                            color: active ? "#fff" : fg,
                           }}
                         >
                           {p}
@@ -1233,7 +1541,7 @@ export default function Page() {
               </>
             )}
 
-            {/* 하단 오른쪽: 선택모드일 때 이동/삭제 버튼 + 메뉴(➕) */}
+            {/* 하단 오른쪽: 선택모드 이동/삭제 + 메뉴(➕) */}
             <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
               {selectMode && (
                 <>
@@ -1244,12 +1552,13 @@ export default function Page() {
                       height: 40,
                       padding: "0 12px",
                       borderRadius: 14,
-                      border: "1px solid #ddd",
-                      background: "#fff",
+                      border,
+                      background: cardBg,
                       fontWeight: 900,
                       cursor: selectedCount > 0 ? "pointer" : "not-allowed",
                       opacity: selectedCount > 0 ? 1 : 0.5,
                       fontSize: 13,
+                      color: fg,
                     }}
                     title="이동"
                   >
@@ -1265,12 +1574,13 @@ export default function Page() {
                       height: 40,
                       padding: "0 12px",
                       borderRadius: 14,
-                      border: "1px solid #ddd",
-                      background: "#fff",
+                      border,
+                      background: cardBg,
                       fontWeight: 900,
                       cursor: selectedCount > 0 ? "pointer" : "not-allowed",
                       opacity: selectedCount > 0 ? 1 : 0.5,
                       fontSize: 13,
+                      color: fg,
                     }}
                     title="삭제"
                   >
@@ -1285,8 +1595,8 @@ export default function Page() {
                   width: 52,
                   height: 52,
                   borderRadius: 18,
-                  border: "1px solid #ddd",
-                  background: "#fff",
+                  border,
+                  background: cardBg,
                   fontWeight: 900,
                   cursor: "pointer",
                   boxShadow: "0 10px 24px rgba(0,0,0,0.12)",
@@ -1294,6 +1604,7 @@ export default function Page() {
                   alignItems: "center",
                   justifyContent: "center",
                   fontSize: 22,
+                  color: fg,
                 }}
                 title="메뉴"
                 aria-label="메뉴"
@@ -1305,7 +1616,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* + 메뉴 팝업 (fixed 레이어) */}
+      {/* + 메뉴 팝업 (fixed) */}
       {historyOpen && menuOpen && menuAnchor && (
         <div
           style={{ position: "fixed", inset: 0, zIndex: 10001 }}
@@ -1320,8 +1631,9 @@ export default function Page() {
               right: menuAnchor.right,
               bottom: menuAnchor.bottom,
               width: 220,
-              background: "#fff",
-              border: "1px solid #ddd",
+              background: cardBg,
+              color: fg,
+              border,
               borderRadius: 14,
               boxShadow: "0 18px 40px rgba(0,0,0,0.14)",
               padding: 8,
@@ -1347,7 +1659,7 @@ export default function Page() {
               }}
             />
 
-            <div style={{ height: 1, background: "#eee", margin: "8px 6px" }} />
+            <div style={{ height: 1, background: theme === "dark" ? "#2a2f3a" : "#eee", margin: "8px 6px" }} />
 
             <MenuButton
               label={selectMode ? "✅ 파일선택 종료" : "☑️ 파일선택"}
@@ -1370,7 +1682,7 @@ export default function Page() {
           style={{
             position: "fixed",
             inset: 0,
-            background: "rgba(0,0,0,0.35)",
+            background: overlay,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -1384,9 +1696,10 @@ export default function Page() {
               width: "min(720px, 100%)",
               maxHeight: "80vh",
               overflow: "auto",
-              background: "#fff",
+              background: cardBg,
+              color: fg,
               borderRadius: 14,
-              border: "1px solid #ddd",
+              border,
               padding: 14,
             }}
             onClick={(e) => e.stopPropagation()}
@@ -1401,21 +1714,13 @@ export default function Page() {
 
               <button
                 onClick={() => setMovePickerOpen(false)}
-                style={{
-                  height: 36,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: "#fff",
-                }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border, cursor: "pointer", fontWeight: 900, background: cardBg, color: fg }}
               >
                 닫기
               </button>
             </div>
 
-            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
+            <div style={{ border: subtleBorder, borderRadius: 12, padding: 10 }}>
               <button
                 onClick={() => setMoveTargetFolderId(null)}
                 style={{
@@ -1423,10 +1728,11 @@ export default function Page() {
                   textAlign: "left",
                   padding: "10px 10px",
                   borderRadius: 10,
-                  border: moveTargetFolderId === null ? "2px solid #111" : "1px solid #ddd",
-                  background: "#fff",
+                  border: moveTargetFolderId === null ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : border,
+                  background: cardBg,
                   cursor: "pointer",
                   fontWeight: 900,
+                  color: fg,
                 }}
               >
                 🧺 전체
@@ -1436,6 +1742,9 @@ export default function Page() {
 
               {buildFolderTree(null, 0).map(({ f, depth }) => {
                 const active = moveTargetFolderId === f.id;
+
+                // ✅ depth에 따라 ↳ 반복 표시
+                const marker = depth > 0 ? "↳ ".repeat(depth) : "";
                 return (
                   <button
                     key={f.id}
@@ -1445,15 +1754,20 @@ export default function Page() {
                       textAlign: "left",
                       padding: "10px 10px",
                       borderRadius: 10,
-                      border: active ? "2px solid #111" : "1px solid #ddd",
-                      background: "#fff",
+                      border: active ? (theme === "dark" ? "2px solid #fff" : "2px solid #111") : border,
+                      background: cardBg,
                       cursor: "pointer",
                       fontWeight: 900,
                       marginTop: 8,
+                      color: fg,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
                     }}
                   >
-                    <span style={{ display: "inline-block", width: depth * 14 }} />
-                    📁 {f.name}
+                    <span style={{ opacity: depth > 0 ? 0.85 : 1, fontSize: 13, whiteSpace: "pre" }}>{marker}</span>
+                    <span style={{ whiteSpace: "pre" }}>📁</span>
+                    <span>{f.name}</span>
                   </button>
                 );
               })}
@@ -1466,10 +1780,11 @@ export default function Page() {
                   height: 38,
                   padding: "0 14px",
                   borderRadius: 10,
-                  border: "1px solid #ddd",
+                  border,
                   cursor: "pointer",
                   fontWeight: 900,
-                  background: "#fff",
+                  background: cardBg,
+                  color: fg,
                 }}
               >
                 취소
@@ -1482,7 +1797,7 @@ export default function Page() {
                   height: 38,
                   padding: "0 14px",
                   borderRadius: 10,
-                  border: "1px solid #ddd",
+                  border,
                   cursor: selectedCount > 0 ? "pointer" : "not-allowed",
                   fontWeight: 900,
                   background: "#111",
@@ -1497,20 +1812,20 @@ export default function Page() {
         </div>
       )}
 
-      {/* Bottom Nav: 이전/복사/다음 */}
+      {/* Bottom Nav */}
       <div
         style={{
           position: "fixed",
           left: 0,
           right: 0,
           bottom: 0,
-          background: "rgba(255,255,255,0.96)",
-          borderTop: "1px solid #ddd",
+          background: theme === "dark" ? "rgba(18,20,27,0.96)" : "rgba(255,255,255,0.96)",
+          borderTop: theme === "dark" ? "1px solid #2a2f3a" : "1px solid #ddd",
           padding: "10px 12px",
           zIndex: 9998,
         }}
       >
-        <div style={{ maxWidth: 860, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ maxWidth: settings.containerMaxWidth, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
           <button
             onClick={goPrev}
             disabled={!canPrev}
@@ -1518,11 +1833,12 @@ export default function Page() {
               height: 40,
               padding: "0 14px",
               borderRadius: 12,
-              border: "1px solid #ddd",
-              background: "#fff",
+              border,
+              background: cardBg,
               fontWeight: 900,
               cursor: canPrev ? "pointer" : "not-allowed",
               opacity: canPrev ? 1 : 0.5,
+              color: fg,
             }}
           >
             ◀ 이전
@@ -1535,11 +1851,12 @@ export default function Page() {
               height: 40,
               padding: "0 14px",
               borderRadius: 12,
-              border: "1px solid #ddd",
-              background: "#fff",
+              border,
+              background: cardBg,
               fontWeight: 900,
               cursor: resultBody.trim() ? "pointer" : "not-allowed",
               opacity: resultBody.trim() ? 1 : 0.5,
+              color: fg,
             }}
           >
             📋 복사
@@ -1552,11 +1869,12 @@ export default function Page() {
               height: 40,
               padding: "0 14px",
               borderRadius: 12,
-              border: "1px solid #ddd",
-              background: "#fff",
+              border,
+              background: cardBg,
               fontWeight: 900,
               cursor: canNext ? "pointer" : "not-allowed",
               opacity: canNext ? 1 : 0.5,
+              color: fg,
             }}
           >
             다음 ▶
