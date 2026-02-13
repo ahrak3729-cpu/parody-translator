@@ -51,21 +51,24 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string;
+  translatedText: string; // ✅ "본문만" 저장 (수동 번역도 안전)
   url?: string;
 
-  // ✅ 폴더
-  folderId?: string | null;
+  folderId?: string | null; // 현재 저장 폴더
+  showHeader?: boolean; // ✅ 뷰어에서 헤더 표시 여부(수동 번역은 false)
 };
 
 type HistoryFolder = {
   id: string;
   createdAt: number;
   name: string;
+
+  // ✅ 폴더 안 폴더 지원
+  parentId: string | null;
 };
 
 const STORAGE_KEY = "parody_translator_history_v3";
-const FOLDERS_KEY = "parody_translator_history_folders_v1";
+const FOLDERS_KEY = "parody_translator_history_folders_v2";
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -157,7 +160,8 @@ export default function Page() {
      원문 / 결과
   ========================= */
   const [source, setSource] = useState("");
-  const [result, setResult] = useState("");
+  const [resultBody, setResultBody] = useState(""); // ✅ 본문만 저장
+  const [showHeader, setShowHeader] = useState(false); // ✅ 화면에서 헤더 표시 여부
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
@@ -175,14 +179,16 @@ export default function Page() {
   });
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
 
-  // ✅ 폴더
+  /* =========================
+     폴더 (중첩 지원)
+  ========================= */
   const [folders, setFolders] = useState<HistoryFolder[]>(() => {
     if (typeof window === "undefined") return [];
     return loadFolders().sort((a, b) => a.createdAt - b.createdAt);
   });
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // null = 전체
-  const [renameMode, setRenameMode] = useState(false);
-  const [renameText, setRenameText] = useState("");
+
+  // ✅ "전체"는 null, 그 외는 현재 폴더 컨텍스트
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
   // ✅ 페이지네이션
   const PAGE_SIZE = 8;
@@ -209,9 +215,41 @@ export default function Page() {
   const canPrev = currentIndex >= 0 && currentIndex < history.length - 1;
   const canNext = currentIndex > 0;
 
-  // ✅ 폴더 필터된 히스토리
+  // ✅ 현재 폴더의 "서브폴더 목록"
+  const currentSubFolders = useMemo(() => {
+    if (selectedFolderId === null) {
+      // 최상위: parentId=null 인 폴더만 노출
+      return folders.filter((f) => f.parentId === null);
+    }
+    return folders.filter((f) => f.parentId === selectedFolderId);
+  }, [folders, selectedFolderId]);
+
+  // ✅ 현재 폴더의 부모
+  const parentFolderId = useMemo(() => {
+    if (selectedFolderId === null) return null;
+    const me = folders.find((f) => f.id === selectedFolderId);
+    return me?.parentId ?? null;
+  }, [folders, selectedFolderId]);
+
+  // ✅ breadcrumb 경로
+  const breadcrumb = useMemo(() => {
+    if (selectedFolderId === null) return ["전체"];
+    const path: string[] = [];
+    let cur: string | null = selectedFolderId;
+
+    while (cur) {
+      const f = folders.find((x) => x.id === cur);
+      if (!f) break;
+      path.unshift(f.name);
+      cur = f.parentId;
+    }
+    path.unshift("전체");
+    return path;
+  }, [folders, selectedFolderId]);
+
+  // ✅ 폴더 필터된 히스토리(현재 폴더에 속한 항목만)
   const filteredHistory = useMemo(() => {
-    if (!selectedFolderId) return history;
+    if (selectedFolderId === null) return history;
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
   }, [history, selectedFolderId]);
 
@@ -240,10 +278,6 @@ export default function Page() {
     return String((data as any)?.translated ?? "");
   }
 
-  function buildViewerText(body: string) {
-    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${body.trim()}`;
-  }
-
   function persistHistory(next: HistoryItem[]) {
     setHistory(next);
     try {
@@ -260,11 +294,12 @@ export default function Page() {
 
   function autoSaveToHistory(params: {
     sourceText: string;
-    translatedText: string;
+    translatedBody: string;
     url?: string;
     seriesTitle: string;
     episodeNo: number;
     subtitle: string;
+    showHeader: boolean;
   }) {
     const item: HistoryItem = {
       id: uid(),
@@ -273,15 +308,15 @@ export default function Page() {
       episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
       subtitle: params.subtitle.trim(),
       sourceText: params.sourceText,
-      translatedText: params.translatedText,
+      translatedText: params.translatedBody, // ✅ 본문만 저장
       url: params.url?.trim() || undefined,
-      folderId: selectedFolderId || null, // ✅ 현재 선택 폴더에 자동 저장
+      folderId: selectedFolderId || null,
+      showHeader: params.showHeader,
     };
 
     const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
     persistHistory(next);
     setCurrentHistoryId(item.id);
-
     setHistoryPage(1);
   }
 
@@ -290,7 +325,8 @@ export default function Page() {
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
-    setResult(it.translatedText);
+    setResultBody(it.translatedText || "");
+    setShowHeader(!!it.showHeader); // ✅ 저장된 표시 규칙을 그대로 사용
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
@@ -304,8 +340,7 @@ export default function Page() {
     const next = history.filter((h) => h.id !== id);
     persistHistory(next);
 
-    // 페이지 범위 보정
-    const nextFiltered = selectedFolderId ? next.filter((h) => (h.folderId || null) === selectedFolderId) : next;
+    const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
@@ -314,7 +349,7 @@ export default function Page() {
       if (next[0]) loadHistoryItem(next[0]);
       else {
         setSource("");
-        setResult("");
+        setResultBody("");
       }
     }
   }
@@ -344,61 +379,50 @@ export default function Page() {
     if (it) loadHistoryItem(it);
   }
 
-  // ✅ ➕ = 새 폴더 만들기
+  /* =========================
+     ✅ 폴더 생성 (현재 폴더 안에 생성)
+  ========================= */
   function createFolder() {
     const name = prompt("새 폴더 이름을 입력해줘");
     if (!name) return;
     const trimmed = name.trim();
     if (!trimmed) return;
 
-    // 같은 이름 폴더 허용은 하되, 실수 방지로 경고만
-    if (folders.some((f) => f.name === trimmed)) {
-      const ok = confirm("같은 이름 폴더가 이미 있어요. 그래도 만들까요?");
-      if (!ok) return;
-    }
+    const f: HistoryFolder = {
+      id: uid(),
+      createdAt: Date.now(),
+      name: trimmed,
+      parentId: selectedFolderId, // ✅ 핵심: 현재 폴더 안에 생성
+    };
 
-    const f: HistoryFolder = { id: uid(), createdAt: Date.now(), name: trimmed };
     const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
     persistFolders(next);
 
-    // 생성하면 그 폴더로 바로 이동
+    // 만든 폴더로 바로 들어가기
     setSelectedFolderId(f.id);
     setHistoryPage(1);
   }
 
-  function startRenameFolder() {
-    if (!selectedFolderId) return;
-    const folder = folders.find((f) => f.id === selectedFolderId);
-    if (!folder) return;
-    setRenameText(folder.name);
-    setRenameMode(true);
-  }
-
-  function applyRenameFolder() {
-    if (!selectedFolderId) return;
-    const folder = folders.find((f) => f.id === selectedFolderId);
-    if (!folder) return;
-
-    const trimmed = renameText.trim();
-    if (!trimmed) {
-      alert("폴더 이름은 비워둘 수 없어요.");
-      return;
-    }
-
-    const next = folders.map((f) => (f.id === selectedFolderId ? { ...f, name: trimmed } : f));
-    persistFolders(next);
-    setRenameMode(false);
+  function goUpFolder() {
+    // 전체면 아무것도 안 함
+    if (selectedFolderId === null) return;
+    setSelectedFolderId(parentFolderId); // parentId가 null이면 최상위(=전체의 폴더목록)로
+    setHistoryPage(1);
   }
 
   /* =========================
      번역 실행
+     - ✅ manual: 헤더 표시/저장 안 함
+     - ✅ url: 헤더 표시/저장 함
   ========================= */
-  async function runTranslation(text: string, sourceUrl?: string) {
+  async function runTranslation(text: string, opts?: { mode: "manual" | "url"; sourceUrl?: string }) {
     if (!text.trim()) return;
+
+    const mode = opts?.mode ?? "manual";
 
     setIsLoading(true);
     setError("");
-    setResult("");
+    setResultBody("");
     setProgress(null);
 
     abortRef.current?.abort();
@@ -418,17 +442,22 @@ export default function Page() {
         out += (out ? "\n\n" : "") + t.trim();
       }
 
-      const finalText = buildViewerText(out);
-      setResult(finalText);
+      // ✅ 결과는 "본문만" 유지
+      setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
+
+      // ✅ 화면 헤더 표시 여부
+      const nextShowHeader = mode === "url";
+      setShowHeader(nextShowHeader);
 
       autoSaveToHistory({
         sourceText: text.trim(),
-        translatedText: finalText,
-        url: sourceUrl,
+        translatedBody: out,
+        url: opts?.sourceUrl,
         seriesTitle: headerPreview.title,
         episodeNo,
         subtitle,
+        showHeader: nextShowHeader,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -478,7 +507,9 @@ export default function Page() {
       }
 
       setSource(text);
-      await runTranslation(text, u);
+
+      // ✅ URL은 헤더 표시 모드
+      await runTranslation(text, { mode: "url", sourceUrl: u });
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
     } finally {
@@ -566,7 +597,7 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
             <button
-              onClick={() => runTranslation(source)}
+              onClick={() => runTranslation(source, { mode: "manual" })}
               disabled={isLoading || !source.trim()}
               style={{
                 height: 40,
@@ -625,13 +656,19 @@ export default function Page() {
             lineHeight: 1.7,
           }}
         >
-          {!result.trim() ? (
+          {!resultBody.trim() ? (
             <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
           ) : (
             <>
-              <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
-              <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
-              <div style={{ fontSize: 16 }}>{result.replace(/^.*\n.*\n\n\n/, "")}</div>
+              {/* ✅ showHeader=true일 때만 제목/회차 표시 */}
+              {showHeader && (
+                <>
+                  <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
+                  <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
+                </>
+              )}
+
+              <div style={{ fontSize: 16 }}>{resultBody}</div>
             </>
           )}
         </div>
@@ -673,7 +710,7 @@ export default function Page() {
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  선택한 폴더에 자동 저장됩니다. (폴더 없으면 전체 보기에서 확인)
+                  현재 폴더: <b>{breadcrumb.join(" / ")}</b>
                 </div>
               </div>
 
@@ -693,8 +730,8 @@ export default function Page() {
               </button>
             </div>
 
-            {/* ✅ 폴더 칩 */}
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+            {/* ✅ 상위로 */}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <button
                 onClick={() => {
                   setSelectedFolderId(null);
@@ -715,82 +752,61 @@ export default function Page() {
                 전체
               </button>
 
-              {folders.map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => {
-                    setSelectedFolderId(f.id);
-                    setHistoryPage(1);
-                    setRenameMode(false);
-                  }}
-                  style={{
-                    height: 34,
-                    padding: "0 12px",
-                    borderRadius: 999,
-                    border: "1px solid #ddd",
-                    background: selectedFolderId === f.id ? "#111" : "#fff",
-                    color: selectedFolderId === f.id ? "#fff" : "#111",
-                    cursor: "pointer",
-                    fontWeight: 900,
-                  }}
-                  title={f.name}
-                >
-                  {f.name}
-                </button>
-              ))}
-
-              {/* 선택 폴더 이름 변경 */}
-              {selectedFolderId && (
-                <button
-                  onClick={startRenameFolder}
-                  style={{
-                    height: 34,
-                    padding: "0 10px",
-                    borderRadius: 999,
-                    border: "1px solid #ddd",
-                    background: "#fff",
-                    cursor: "pointer",
-                    fontWeight: 900,
-                  }}
-                  title="폴더 이름 변경"
-                >
-                  ✎
-                </button>
-              )}
+              <button
+                onClick={goUpFolder}
+                disabled={selectedFolderId === null}
+                style={{
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 999,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: selectedFolderId === null ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: selectedFolderId === null ? 0.5 : 1,
+                }}
+                title="상위 폴더"
+              >
+                ⬅ 상위
+              </button>
             </div>
 
-            {renameMode && selectedFolderId && (
-              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-                <input
-                  value={renameText}
-                  onChange={(e) => setRenameText(e.target.value)}
-                  style={{ flex: 1, height: 36, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd" }}
-                  placeholder="폴더 이름"
-                />
-                <button
-                  onClick={applyRenameFolder}
-                  style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
-                >
-                  저장
-                </button>
-                <button
-                  onClick={() => setRenameMode(false)}
-                  style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
-                >
-                  취소
-                </button>
+            {/* ✅ 서브폴더 목록 */}
+            {currentSubFolders.length > 0 && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                {currentSubFolders.map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => {
+                      setSelectedFolderId(f.id);
+                      setHistoryPage(1);
+                    }}
+                    style={{
+                      height: 34,
+                      padding: "0 12px",
+                      borderRadius: 999,
+                      border: "1px solid #ddd",
+                      background: "#fff",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                    title="폴더 열기"
+                  >
+                    📁 {f.name}
+                  </button>
+                ))}
               </div>
             )}
 
+            {/* 히스토리 리스트 */}
             {filteredHistory.length === 0 ? (
               <div style={{ opacity: 0.65, padding: 10 }}>(이 폴더에 저장된 항목이 없어요)</div>
             ) : (
               <>
                 <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
                   {pagedHistory.map((it) => {
-                    const label = it.subtitle
-                      ? `${it.seriesTitle} · ${it.episodeNo}화 · ${it.subtitle}`
-                      : `${it.seriesTitle} · ${it.episodeNo}화`;
+                    // ✅ 히스토리 항목은 간단히: 이름 + 회차 (요청 반영)
+                    const label = `${it.seriesTitle} · ${it.episodeNo}화`;
 
                     return (
                       <div
@@ -880,7 +896,7 @@ export default function Page() {
               </>
             )}
 
-            {/* ✅ 오른쪽 하단 ➕ = 폴더 생성 */}
+            {/* ✅ 오른쪽 하단 ➕ = "현재 폴더 안에" 새 폴더 */}
             <button
               onClick={createFolder}
               style={{
@@ -940,8 +956,8 @@ export default function Page() {
           </button>
 
           <button
-            onClick={() => handleCopy(result || "")}
-            disabled={!result.trim()}
+            onClick={() => handleCopy(resultBody || "")}
+            disabled={!resultBody.trim()}
             style={{
               height: 40,
               padding: "0 14px",
@@ -949,8 +965,8 @@ export default function Page() {
               border: "1px solid #ddd",
               background: "#fff",
               fontWeight: 900,
-              cursor: result.trim() ? "pointer" : "not-allowed",
-              opacity: result.trim() ? 1 : 0.5,
+              cursor: resultBody.trim() ? "pointer" : "not-allowed",
+              opacity: resultBody.trim() ? 1 : 0.5,
             }}
           >
             📋 복사
