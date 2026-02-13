@@ -188,6 +188,10 @@ export default function Page() {
   // 이동 UI: 선택한 항목
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
+  // ✅ 이동 대상 폴더 선택 창
+  const [movePickerOpen, setMovePickerOpen] = useState(false);
+  const [moveTargetFolderId, setMoveTargetFolderId] = useState<string | null>(null);
+
   // 페이지네이션
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
@@ -201,9 +205,7 @@ export default function Page() {
   }, [seriesTitle, episodeNo, subtitle]);
 
   const percent =
-    progress && progress.total
-      ? Math.floor((progress.current / progress.total) * 100)
-      : 0;
+    progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
 
   const currentIndex = useMemo(() => {
     if (!currentHistoryId) return -1;
@@ -212,11 +214,6 @@ export default function Page() {
 
   const canPrev = currentIndex >= 0 && currentIndex < history.length - 1;
   const canNext = currentIndex > 0;
-
-  const currentSubFolders = useMemo(() => {
-    if (selectedFolderId === null) return folders.filter((f) => f.parentId === null);
-    return folders.filter((f) => f.parentId === selectedFolderId);
-  }, [folders, selectedFolderId]);
 
   const parentFolderId = useMemo(() => {
     if (selectedFolderId === null) return null;
@@ -239,6 +236,11 @@ export default function Page() {
     return path;
   }, [folders, selectedFolderId]);
 
+  const currentSubFolders = useMemo(() => {
+    const pid = selectedFolderId;
+    return folders.filter((f) => f.parentId === pid);
+  }, [folders, selectedFolderId]);
+
   const filteredHistory = useMemo(() => {
     if (selectedFolderId === null) return history;
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
@@ -252,6 +254,11 @@ export default function Page() {
     const start = (historyPage - 1) * PAGE_SIZE;
     return filteredHistory.slice(start, start + PAGE_SIZE);
   }, [filteredHistory, historyPage]);
+
+  const selectedItem = useMemo(() => {
+    if (!selectedItemId) return null;
+    return history.find((h) => h.id === selectedItemId) ?? null;
+  }, [history, selectedItemId]);
 
   function persistHistory(next: HistoryItem[]) {
     setHistory(next);
@@ -267,11 +274,16 @@ export default function Page() {
     } catch {}
   }
 
+  function folderNameById(id: string | null) {
+    if (id === null) return "전체";
+    const f = folders.find((x) => x.id === id);
+    return f ? f.name : "알 수 없는 폴더";
+  }
+
   /* =========================
      폴더 유틸 (재귀)
   ========================= */
   function collectDescFolderIds(rootId: string): string[] {
-    // rootId 포함, 모든 하위 폴더 id 수집
     const result: string[] = [rootId];
     const stack: string[] = [rootId];
 
@@ -286,10 +298,16 @@ export default function Page() {
     return result;
   }
 
-  function folderNameById(id: string | null) {
-    if (id === null) return "전체";
-    const f = folders.find((x) => x.id === id);
-    return f ? f.name : "알 수 없는 폴더";
+  function buildFolderTree(parentId: string | null, depth = 0): Array<{ f: HistoryFolder; depth: number }> {
+    const children = folders
+      .filter((x) => x.parentId === parentId)
+      .sort((a, b) => a.name.localeCompare(b.name, "ko"));
+    const out: Array<{ f: HistoryFolder; depth: number }> = [];
+    for (const f of children) {
+      out.push({ f, depth });
+      out.push(...buildFolderTree(f.id, depth + 1));
+    }
+    return out;
   }
 
   /* =========================
@@ -341,22 +359,17 @@ export default function Page() {
     const f = folders.find((x) => x.id === selectedFolderId);
     if (!f) return;
 
-    const ok = confirm(
-      `폴더 "${f.name}" 를 삭제할까요?\n하위 폴더/그 안의 항목도 함께 삭제됩니다.`
-    );
+    const ok = confirm(`폴더 "${f.name}" 를 삭제할까요?\n하위 폴더/그 안의 항목도 함께 삭제됩니다.`);
     if (!ok) return;
 
     const idsToDelete = collectDescFolderIds(f.id);
 
-    // 폴더 삭제
     const nextFolders = folders.filter((x) => !idsToDelete.includes(x.id));
     persistFolders(nextFolders);
 
-    // 해당 폴더들에 속한 히스토리 항목 삭제
     const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
     persistHistory(nextHistory);
 
-    // 현재 위치를 상위로
     setSelectedFolderId(f.parentId);
     setHistoryPage(1);
     setSelectedItemId(null);
@@ -370,13 +383,21 @@ export default function Page() {
   }
 
   /* =========================
-     항목 이동
+     항목 이동(폴더 선택 창)
   ========================= */
-  function moveSelectedItemToFolder(targetFolderId: string | null) {
+  function openMovePicker() {
     if (!selectedItemId) {
-      alert("이동할 항목을 먼저 선택(○)해줘.");
+      alert("이동할 번역본을 먼저 선택(○)해줘.");
       return;
     }
+    const it = history.find((h) => h.id === selectedItemId);
+    const currentFolder = (it?.folderId || null) as string | null;
+    setMoveTargetFolderId(currentFolder); // 기본값: 현재 위치
+    setMovePickerOpen(true);
+  }
+
+  function moveSelectedItemToFolder(targetFolderId: string | null) {
+    if (!selectedItemId) return;
 
     const item = history.find((h) => h.id === selectedItemId);
     if (!item) return;
@@ -386,8 +407,9 @@ export default function Page() {
     );
     persistHistory(next);
 
-    // 이동 후 선택 해제
+    setMovePickerOpen(false);
     setSelectedItemId(null);
+
     alert(`이동 완료: "${folderNameById(targetFolderId)}"`);
   }
 
@@ -533,7 +555,7 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      const nextShowHeader = mode === "url";
+      const nextShowHeader = mode === "url"; // ✅ 수동 번역은 헤더 숨김
       setShowHeader(nextShowHeader);
 
       autoSaveToHistory({
@@ -794,8 +816,31 @@ export default function Page() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
-                <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  현재 폴더: <b>{breadcrumb.join(" / ")}</b>
+
+                {/* ✅ 상태줄(빵부스러기) + 끝에 아이콘 */}
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span>
+                    현재 폴더: <b>{breadcrumb.join(" / ")}</b>
+                  </span>
+
+                  {/* ✅ 폴더 안에 들어왔을 때만 보여줌 */}
+                  {selectedFolderId !== null && (
+                    <button
+                      onClick={renameCurrentFolder}
+                      style={{
+                        width: 32,
+                        height: 28,
+                        borderRadius: 10,
+                        border: "1px solid #ddd",
+                        background: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      title="폴더 이름 수정"
+                    >
+                      ✏️
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -848,25 +893,6 @@ export default function Page() {
                 ⬅ 상위
               </button>
 
-              {/* ✅ 폴더 리네임/삭제(현재 폴더에서만) */}
-              <button
-                onClick={renameCurrentFolder}
-                disabled={selectedFolderId === null}
-                style={{
-                  height: 34,
-                  padding: "0 12px",
-                  borderRadius: 999,
-                  border: "1px solid #ddd",
-                  background: "#fff",
-                  cursor: selectedFolderId === null ? "not-allowed" : "pointer",
-                  fontWeight: 900,
-                  opacity: selectedFolderId === null ? 0.5 : 1,
-                }}
-                title="폴더 이름 수정"
-              >
-                ✏️ 폴더 이름
-              </button>
-
               <button
                 onClick={deleteCurrentFolder}
                 disabled={selectedFolderId === null}
@@ -886,7 +912,7 @@ export default function Page() {
               </button>
             </div>
 
-            {/* ✅ 항목 이동 바 */}
+            {/* ✅ 이동 바: “어디로 이동할지 선택” 흐름 */}
             <div
               style={{
                 border: "1px solid #eee",
@@ -894,18 +920,24 @@ export default function Page() {
                 padding: 10,
                 marginBottom: 12,
                 display: "flex",
-                gap: 8,
+                gap: 10,
                 alignItems: "center",
                 flexWrap: "wrap",
                 background: "#fafafa",
               }}
             >
-              <div style={{ fontSize: 13, opacity: 0.8 }}>
-                이동할 항목: <b>{selectedItemId ? "선택됨" : "없음"}</b>
+              <div style={{ fontSize: 13, opacity: 0.85 }}>
+                선택된 번역본: <b>{selectedItemId ? "선택됨" : "없음"}</b>
+                {selectedItem ? (
+                  <span style={{ opacity: 0.75 }}>
+                    {" "}
+                    · 현재 위치: <b>{folderNameById((selectedItem.folderId || null) as any)}</b>
+                  </span>
+                ) : null}
               </div>
 
               <button
-                onClick={() => moveSelectedItemToFolder(selectedFolderId)}
+                onClick={openMovePicker}
                 disabled={!selectedItemId}
                 style={{
                   height: 34,
@@ -917,13 +949,13 @@ export default function Page() {
                   fontWeight: 900,
                   opacity: selectedItemId ? 1 : 0.5,
                 }}
-                title="현재 폴더로 이동"
+                title="이동할 폴더 선택"
               >
-                📦 현재 폴더로 이동
+                📦 이동…
               </button>
 
               <button
-                onClick={() => moveSelectedItemToFolder(null)}
+                onClick={() => setSelectedItemId(null)}
                 disabled={!selectedItemId}
                 style={{
                   height: 34,
@@ -935,29 +967,40 @@ export default function Page() {
                   fontWeight: 900,
                   opacity: selectedItemId ? 1 : 0.5,
                 }}
-                title="전체(미분류)로 이동"
+                title="선택 해제"
               >
-                🧺 전체로 이동
+                선택 해제
               </button>
             </div>
 
             {/* 서브폴더 목록 */}
             {currentSubFolders.length > 0 && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-                {currentSubFolders.map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => {
-                      setSelectedFolderId(f.id);
-                      setHistoryPage(1);
-                      setSelectedItemId(null);
-                    }}
-                    style={{ height: 34, padding: "0 12px", borderRadius: 999, border: "1px solid #ddd", background: "#fff", cursor: "pointer", fontWeight: 900 }}
-                    title="폴더 열기"
-                  >
-                    📁 {f.name}
-                  </button>
-                ))}
+                {currentSubFolders
+                  .slice()
+                  .sort((a, b) => a.name.localeCompare(b.name, "ko"))
+                  .map((f) => (
+                    <button
+                      key={f.id}
+                      onClick={() => {
+                        setSelectedFolderId(f.id);
+                        setHistoryPage(1);
+                        setSelectedItemId(null);
+                      }}
+                      style={{
+                        height: 34,
+                        padding: "0 12px",
+                        borderRadius: 999,
+                        border: "1px solid #ddd",
+                        background: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      title="폴더 열기"
+                    >
+                      📁 {f.name}
+                    </button>
+                  ))}
               </div>
             )}
 
@@ -984,7 +1027,7 @@ export default function Page() {
                           alignItems: "center",
                         }}
                       >
-                        {/* ✅ 이동할 항목 선택 */}
+                        {/* 이동할 항목 선택 */}
                         <button
                           onClick={() => setSelectedItemId((prev) => (prev === it.id ? null : it.id))}
                           style={{
@@ -1100,6 +1143,136 @@ export default function Page() {
             >
               ➕
             </button>
+
+            {/* =========================
+                Move Picker Modal
+               ========================= */}
+            {movePickerOpen && (
+              <div
+                role="dialog"
+                aria-modal="true"
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  background: "rgba(0,0,0,0.35)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 16,
+                  zIndex: 10000,
+                }}
+                onClick={() => setMovePickerOpen(false)}
+              >
+                <div
+                  style={{
+                    width: "min(720px, 100%)",
+                    maxHeight: "80vh",
+                    overflow: "auto",
+                    background: "#fff",
+                    borderRadius: 14,
+                    border: "1px solid #ddd",
+                    padding: 14,
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                        선택된 항목:{" "}
+                        <b>
+                          {selectedItem
+                            ? `${selectedItem.seriesTitle} · ${selectedItem.episodeNo}화`
+                            : "—"}
+                        </b>
+                        {" · "}
+                        현재: <b>{folderNameById((selectedItem?.folderId || null) as any)}</b>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => setMovePickerOpen(false)}
+                      style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
+                    >
+                      닫기
+                    </button>
+                  </div>
+
+                  <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
+                    {/* 전체 */}
+                    <button
+                      onClick={() => setMoveTargetFolderId(null)}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        padding: "10px 10px",
+                        borderRadius: 10,
+                        border: moveTargetFolderId === null ? "2px solid #111" : "1px solid #ddd",
+                        background: "#fff",
+                        cursor: "pointer",
+                        fontWeight: 900,
+                      }}
+                      title="전체(최상위)로 이동"
+                    >
+                      🧺 전체
+                    </button>
+
+                    <div style={{ height: 10 }} />
+
+                    {/* 폴더 트리 */}
+                    {buildFolderTree(null, 0).map(({ f, depth }) => {
+                      const active = moveTargetFolderId === f.id;
+                      return (
+                        <button
+                          key={f.id}
+                          onClick={() => setMoveTargetFolderId(f.id)}
+                          style={{
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "10px 10px",
+                            borderRadius: 10,
+                            border: active ? "2px solid #111" : "1px solid #ddd",
+                            background: "#fff",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            marginTop: 8,
+                          }}
+                          title="이 폴더로 이동"
+                        >
+                          <span style={{ display: "inline-block", width: depth * 14 }} />
+                          📁 {f.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
+                    <div style={{ fontSize: 13, opacity: 0.75 }}>
+                      선택된 이동 대상: <b>{folderNameById(moveTargetFolderId)}</b>
+                    </div>
+
+                    <button
+                      onClick={() => moveSelectedItemToFolder(moveTargetFolderId)}
+                      disabled={!selectedItemId}
+                      style={{
+                        height: 38,
+                        padding: "0 14px",
+                        borderRadius: 10,
+                        border: "1px solid #ddd",
+                        cursor: selectedItemId ? "pointer" : "not-allowed",
+                        fontWeight: 900,
+                        background: "#111",
+                        color: "#fff",
+                        opacity: selectedItemId ? 1 : 0.5,
+                      }}
+                      title="이 폴더로 이동 확정"
+                    >
+                      이동 확정
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
