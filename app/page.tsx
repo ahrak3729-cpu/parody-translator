@@ -23,7 +23,6 @@ function chunkText(input: string, maxChars = 4500): string[] {
     const p = p0.trim();
     if (!p) continue;
 
-    // 단락이 너무 길면 강제로 잘라 넣기
     if (p.length > maxChars) {
       push();
       for (let i = 0; i < p.length; i += maxChars) {
@@ -45,20 +44,14 @@ function chunkText(input: string, maxChars = 4500): string[] {
 
 type Progress = { current: number; total: number } | null;
 
-/* =========================
-   History (flat list)
-========================= */
 type HistoryItem = {
   id: string;
   createdAt: number;
-  // 표시/정리용(나중에 히스토리에서 수정 가능)
-  seriesTitle: string; // "패러디소설 제목" 역할
-  episodeNo: number; // 1부터 저장
-  subtitle: string; // 선택
-  // 내용
+  seriesTitle: string;
+  episodeNo: number;
+  subtitle: string;
   sourceText: string;
   translatedText: string;
-  // 출처(선택)
   url?: string;
 };
 
@@ -74,7 +67,6 @@ function loadHistory(): HistoryItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // 최소 방어
     return parsed.filter((x) => x && typeof x === "object" && typeof x.id === "string");
   } catch {
     return [];
@@ -95,6 +87,29 @@ function formatDate(ts: number) {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
+async function safeReadJson(res: Response) {
+  // JSON이 아닌 응답(HTML/빈 응답)에도 안죽게 방어
+  const contentType = res.headers.get("content-type") || "";
+  const raw = await res.text();
+
+  if (!raw.trim()) return { __raw: "", __notJson: true, __contentType: contentType };
+
+  if (contentType.includes("application/json")) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { __raw: raw, __notJson: true, __contentType: contentType };
+    }
+  }
+
+  // content-type이 json이 아니어도, 실제로 json일 수 있으니 한 번 더 시도
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { __raw: raw, __notJson: true, __contentType: contentType };
+  }
+}
+
 export default function Page() {
   /* =========================
      URL 중심
@@ -103,12 +118,13 @@ export default function Page() {
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
 
   /* =========================
-     텍스트(수동) 모드: 접어두기
+     텍스트 직접 번역: 접기/펴기
   ========================= */
   const [manualOpen, setManualOpen] = useState(false);
 
   /* =========================
-     메타(선택): 히스토리에서 수정 가능
+     메타(저장은 자동, 기본값만)
+     - 입력칸은 UI에서 제거함
   ========================= */
   const [seriesTitle, setSeriesTitle] = useState("패러디소설");
   const [episodeNo, setEpisodeNo] = useState(1);
@@ -126,15 +142,23 @@ export default function Page() {
   const abortRef = useRef<AbortController | null>(null);
 
   /* =========================
-     History UI
+     History UI + 이전/다음 네비
   ========================= */
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>(() => {
     if (typeof window === "undefined") return [];
-    const items = loadHistory();
-    // 최신이 위로 오도록 정렬
-    return items.sort((a, b) => b.createdAt - a.createdAt);
+    const items = loadHistory().sort((a, b) => b.createdAt - a.createdAt);
+    return items;
   });
+  const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+
+  const currentIndex = useMemo(() => {
+    if (!currentHistoryId) return -1;
+    return history.findIndex((h) => h.id === currentHistoryId);
+  }, [history, currentHistoryId]);
+
+  const canPrev = currentIndex >= 0 && currentIndex < history.length - 1; // 최신이 0, 이전은 index+1
+  const canNext = currentIndex > 0; // 다음(더 최신)은 index-1
 
   const percent =
     progress && progress.total
@@ -142,10 +166,11 @@ export default function Page() {
       : 0;
 
   const headerPreview = useMemo(() => {
+    const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
     const epLine = subtitle.trim()
       ? `제 ${episodeNo}화 · ${subtitle.trim()}`
       : `제 ${episodeNo}화`;
-    return { title: seriesTitle.trim() || "패러디소설", epLine };
+    return { title, epLine };
   }, [seriesTitle, episodeNo, subtitle]);
 
   /* =========================
@@ -158,17 +183,20 @@ export default function Page() {
       body: JSON.stringify({ text }),
       signal,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "번역 실패");
-    return String(data?.translated ?? "");
+    const data = await safeReadJson(res);
+
+    if (!res.ok) {
+      const msg =
+        (data && (data.error || data.message)) ||
+        "번역 실패";
+      throw new Error(String(msg));
+    }
+
+    return String((data as any)?.translated ?? "");
   }
 
   function buildViewerText(body: string) {
-    const title = headerPreview.title;
-    const epLine = headerPreview.epLine;
-
-    // “제목+회차/부제목”과 본문 사이를 넉넉하게 띄움
-    return `${title}\n${epLine}\n\n\n${body.trim()}`;
+    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${body.trim()}`;
   }
 
   function autoSaveToHistory(params: {
@@ -192,11 +220,11 @@ export default function Page() {
 
     const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
     setHistory(next);
+    setCurrentHistoryId(item.id);
+
     try {
       saveHistory(next);
-    } catch {
-      // ignore
-    }
+    } catch {}
   }
 
   function loadHistoryItem(it: HistoryItem) {
@@ -207,41 +235,26 @@ export default function Page() {
     setResult(it.translatedText);
     setError("");
     setProgress(null);
+    setCurrentHistoryId(it.id);
     setHistoryOpen(false);
   }
 
   function deleteHistoryItem(id: string) {
     const ok = confirm("이 항목을 삭제할까요?");
     if (!ok) return;
+
     const next = history.filter((h) => h.id !== id);
     setHistory(next);
-    try {
-      saveHistory(next);
-    } catch {}
-  }
 
-  function renameHistoryItem(id: string) {
-    const it = history.find((h) => h.id === id);
-    if (!it) return;
+    if (currentHistoryId === id) {
+      setCurrentHistoryId(next[0]?.id ?? null);
+      if (next[0]) loadHistoryItem(next[0]);
+      else {
+        setSource("");
+        setResult("");
+      }
+    }
 
-    const nextTitle = prompt("히스토리 이름(작품명)을 수정해줘:", it.seriesTitle);
-    if (nextTitle === null) return;
-
-    const nextEpisode = prompt("회차 번호(숫자) 수정:", String(it.episodeNo));
-    if (nextEpisode === null) return;
-
-    const nextSub = prompt("부제목(없으면 비워도 됨) 수정:", it.subtitle || "");
-    if (nextSub === null) return;
-
-    const ep = Math.max(1, Math.floor(Number(nextEpisode) || 1));
-
-    const next = history.map((h) =>
-      h.id === id
-        ? { ...h, seriesTitle: nextTitle.trim() || h.seriesTitle, episodeNo: ep, subtitle: (nextSub || "").trim() }
-        : h
-    );
-
-    setHistory(next);
     try {
       saveHistory(next);
     } catch {}
@@ -258,6 +271,18 @@ export default function Page() {
 
   function handleCancel() {
     abortRef.current?.abort();
+  }
+
+  function goPrev() {
+    if (!canPrev) return;
+    const it = history[currentIndex + 1];
+    if (it) loadHistoryItem(it);
+  }
+
+  function goNext() {
+    if (!canNext) return;
+    const it = history[currentIndex - 1];
+    if (it) loadHistoryItem(it);
   }
 
   /* =========================
@@ -288,15 +313,12 @@ export default function Page() {
         setProgress({ current: i, total: chunks.length });
         const t = await translateChunk(chunks[i], controller.signal);
         out += (out ? "\n\n" : "") + t.trim();
-        // 진행 중에도 화면에 보여주고 싶으면 아래 줄을 살려도 됨
-        // setResult(buildViewerText(out));
       }
 
       const finalText = buildViewerText(out);
       setResult(finalText);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 자동저장(히스토리)
       autoSaveToHistory({
         sourceText: text.trim(),
         translatedText: finalText,
@@ -316,7 +338,7 @@ export default function Page() {
 
   /* =========================
      URL → 본문 불러오기
-========================= */
+  ========================= */
   async function fetchFromUrl() {
     const u = url.trim();
     if (!u) return;
@@ -330,13 +352,32 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: u }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "본문 불러오기 실패");
 
-      // title이 있으면 작품명 후보로 저장(입력칸은 없지만 메타에 반영)
+      const data: any = await safeReadJson(res);
+
+      if (!res.ok) {
+        const msg =
+          data?.error ||
+          data?.message ||
+          "본문 불러오기 실패";
+        throw new Error(String(msg));
+      }
+
+      // JSON이 아니었던 경우(대부분 Pixiv 차단/로그인 필요)
+      if (data?.__notJson) {
+        throw new Error(
+          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(다른 사이트로 테스트하거나, 텍스트 직접 붙여넣기로 확인해줘)"
+        );
+      }
+
       if (data?.title) setSeriesTitle(String(data.title));
-
       const text = String(data?.text ?? "");
+      if (!text.trim()) {
+        throw new Error(
+          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
+        );
+      }
+
       setSource(text);
 
       // URL 불러오면 바로 번역까지
@@ -350,9 +391,9 @@ export default function Page() {
 
   /* =========================
      UI
-========================= */
+  ========================= */
   return (
-    <main style={{ maxWidth: 860, margin: "0 auto", padding: 24 }}>
+    <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86 }}>
       {/* 상단바 + 히스토리 버튼 */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
         <div>
@@ -405,50 +446,21 @@ export default function Page() {
         </button>
       </div>
 
-      {/* 메타데이터는 접어두기(선택) */}
-      <details style={{ marginBottom: 12 }}>
+      {/* 텍스트 직접 번역 (문구 정리: 괄호 제거) */}
+      <details
+        open={manualOpen}
+        onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
+        style={{ marginBottom: 12 }}
+      >
         <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>
-          메타데이터(선택) — 작품명/회차/부제목
-        </summary>
-        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-          <input
-            value={seriesTitle}
-            onChange={(e) => setSeriesTitle(e.target.value)}
-            placeholder="작품명(히스토리 표시용)"
-            style={{ width: "100%", padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={String(episodeNo)}
-              onChange={(e) => setEpisodeNo(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
-              placeholder="회차(숫자)"
-              inputMode="numeric"
-              style={{ width: 160, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-            />
-            <input
-              value={subtitle}
-              onChange={(e) => setSubtitle(e.target.value)}
-              placeholder="부제목(선택)"
-              style={{ flex: 1, padding: 10, borderRadius: 10, border: "1px solid #ddd" }}
-            />
-          </div>
-          <div style={{ fontSize: 12, opacity: 0.7 }}>
-            출력 헤더 미리보기: <b>{headerPreview.title}</b> / <b>{headerPreview.epLine}</b>
-          </div>
-        </div>
-      </details>
-
-      {/* 텍스트 번역(접어두기) */}
-      <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
-        <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>
-          텍스트 직접 번역 (필요할 때만 펼치기)
+          텍스트 직접 번역
         </summary>
 
         <div style={{ marginTop: 10 }}>
           <textarea
             value={source}
             onChange={(e) => setSource(e.target.value)}
-            placeholder="또는 원문을 직접 붙여넣기"
+            placeholder="원문을 직접 붙여넣기"
             style={{
               width: "100%",
               minHeight: 160,
@@ -503,29 +515,12 @@ export default function Page() {
         </div>
       </details>
 
-      {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700 }}>{error}</div>}
+      {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
 
-      {/* 결과: “제목+회차+본문”이 한 공간에 보이도록 Viewer 스타일 */}
+      {/* 결과: Viewer 스타일 */}
       <div style={{ marginTop: 14 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
           <div style={{ fontWeight: 900, opacity: 0.85 }}>번역 결과</div>
-          <button
-            onClick={() => handleCopy(result)}
-            disabled={!result.trim()}
-            style={{
-              height: 36,
-              padding: "0 12px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              cursor: !result.trim() ? "not-allowed" : "pointer",
-              fontWeight: 900,
-              background: "#fff",
-              opacity: !result.trim() ? 0.6 : 1,
-            }}
-            title="복사"
-          >
-            📋 복사
-          </button>
         </div>
 
         <div
@@ -543,21 +538,14 @@ export default function Page() {
             <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
           ) : (
             <>
-              {/* 제목 라인: 크게/두껍게 */}
               <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
                 {headerPreview.title}
               </div>
-
-              {/* 회차 + 부제목: 주석처럼 */}
               <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>
                 {headerPreview.epLine}
               </div>
-
-              {/* 본문 */}
               <div style={{ fontSize: 16 }}>
-                {result
-                  // viewer용으로 buildViewerText에서 넣은 헤더(2줄 + 공백)를 제거하고 본문만 보여주기
-                  .replace(/^.*\n.*\n\n\n/, "")}
+                {result.replace(/^.*\n.*\n\n\n/, "")}
               </div>
             </>
           )}
@@ -599,13 +587,21 @@ export default function Page() {
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  번역 완료 시 자동 저장됩니다. (작품명/회차/부제목은 “수정”으로 변경 가능)
+                  번역 완료 시 자동 저장됩니다.
                 </div>
               </div>
 
               <button
                 onClick={() => setHistoryOpen(false)}
-                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
+                style={{
+                  height: 36,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: "#fff",
+                }}
               >
                 닫기
               </button>
@@ -668,22 +664,6 @@ export default function Page() {
                       </button>
 
                       <button
-                        onClick={() => renameHistoryItem(it.id)}
-                        style={{
-                          width: 56,
-                          height: 34,
-                          borderRadius: 10,
-                          border: "1px solid #ddd",
-                          cursor: "pointer",
-                          fontWeight: 900,
-                          background: "#fff",
-                        }}
-                        title="이름/회차/부제목 수정"
-                      >
-                        수정
-                      </button>
-
-                      <button
                         onClick={() => deleteHistoryItem(it.id)}
                         style={{
                           width: 44,
@@ -706,6 +686,84 @@ export default function Page() {
           </div>
         </div>
       )}
+
+      {/* =========================
+          Bottom Nav: 이전 / 복사 / 다음
+         ========================= */}
+      <div
+        style={{
+          position: "fixed",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: "rgba(255,255,255,0.96)",
+          borderTop: "1px solid #ddd",
+          padding: "10px 12px",
+          zIndex: 9998,
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 860,
+            margin: "0 auto",
+            display: "flex",
+            gap: 10,
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
+        >
+          <button
+            onClick={goPrev}
+            disabled={!canPrev}
+            style={{
+              height: 40,
+              padding: "0 14px",
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              background: "#fff",
+              fontWeight: 900,
+              cursor: canPrev ? "pointer" : "not-allowed",
+              opacity: canPrev ? 1 : 0.5,
+            }}
+          >
+            ◀ 이전
+          </button>
+
+          <button
+            onClick={() => handleCopy(result || "")}
+            disabled={!result.trim()}
+            style={{
+              height: 40,
+              padding: "0 14px",
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              background: "#fff",
+              fontWeight: 900,
+              cursor: result.trim() ? "pointer" : "not-allowed",
+              opacity: result.trim() ? 1 : 0.5,
+            }}
+          >
+            📋 복사
+          </button>
+
+          <button
+            onClick={goNext}
+            disabled={!canNext}
+            style={{
+              height: 40,
+              padding: "0 14px",
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              background: "#fff",
+              fontWeight: 900,
+              cursor: canNext ? "pointer" : "not-allowed",
+              opacity: canNext ? 1 : 0.5,
+            }}
+          >
+            다음 ▶
+          </button>
+        </div>
+      </div>
     </main>
   );
 }
