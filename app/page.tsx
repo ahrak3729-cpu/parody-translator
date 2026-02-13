@@ -1075,4 +1075,3 @@ Then a whisper: "You opened the door."`,
     </main>
   );
 }
-```0
