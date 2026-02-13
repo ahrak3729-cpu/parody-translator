@@ -85,24 +85,22 @@ type FolderNode = {
 type ItemNode = {
   id: string;
   type: "item";
-  name: string; // 히스토리 표시명: "소설제목 · 제 N화"
+  name: string; // 히스토리 표시명: 소설제목 + 회차
   createdAt: number;
 
-  // 메타(표시/헤더용)
-  seriesTitle: string; // 패러디/웹소설 큰 제목
+  novelTitle: string; // 큰 제목(=시리즈/작품명)
   episodeIndex: number;
-  episodeSubtitle: string; // 부제목(없을 수 있음)
-
+  episodeLabel: string; // 1화, 2화...
+  subtitle: string; // 부제목(선택)
   sourceText: string;
-  translatedBody: string;
+  translatedText: string;
 
-  // ✅ 중복 방지(같은 제목+회차면 최신 번역으로 업데이트)
-  key: string; // seriesTitle|episodeIndex
+  key: string; // novelTitle|episodeIndex (같은 회차 업데이트용)
 };
 
 type TreeNode = FolderNode | ItemNode;
 
-const STORAGE_KEY = "parody_translator_history_v5"; // v5: 히스토리 루트 단일 + 폴더명 수정 + 헤더(제목/회차/부제목)
+const STORAGE_KEY = "parody_translator_history_v3";
 const ROOT_ID = "history_root";
 const ROOT_NAME = "히스토리";
 
@@ -113,13 +111,14 @@ function uid() {
 function loadTree(): FolderNode {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
-
+    if (!raw) {
+      return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
+    }
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.type !== "folder" || !Array.isArray(parsed.children)) {
       return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
     }
-    // 루트 이름/ID 강제(이전 버전 데이터가 있어도 정합 유지)
+    // 혹시 이전 버전 루트명이 달라도 강제로 교정
     return { ...(parsed as FolderNode), id: ROOT_ID, name: ROOT_NAME };
   } catch {
     return { id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] };
@@ -188,7 +187,7 @@ function extractNode(root: FolderNode, targetId: string): { nextRoot: FolderNode
 
 function findItemByKey(root: FolderNode, key: string): ItemNode | null {
   for (const child of root.children) {
-    if (child.type === "item" && (child as ItemNode).key === key) return child as ItemNode;
+    if (child.type === "item" && child.key === key) return child as ItemNode;
     if (child.type === "folder") {
       const found = findItemByKey(child, key);
       if (found) return found;
@@ -210,21 +209,23 @@ function replaceItemById(root: FolderNode, itemId: string, nextItem: ItemNode): 
 }
 
 function renameFolderById(root: FolderNode, folderId: string, nextName: string): FolderNode {
-  if (root.id === folderId) {
-    // 루트는 이름 고정
-    return root;
-  }
+  const name = nextName.trim();
+  if (!name) return root;
+
   function helper(folder: FolderNode): FolderNode {
     const nextChildren = folder.children.map((c) => {
       if (c.type === "folder") {
-        const fc = c as FolderNode;
-        if (fc.id === folderId) return { ...fc, name: nextName };
-        return helper(fc);
+        if (c.id === folderId) return { ...c, name };
+        return helper(c);
       }
       return c;
     });
+    if (folder.id === folderId) return { ...folder, name };
     return { ...folder, children: nextChildren };
   }
+
+  // 루트는 UI에서 숨기지만 이름은 고정
+  if (folderId === ROOT_ID) return root;
   return helper(root);
 }
 
@@ -239,31 +240,10 @@ function formatDate(ts: number) {
 }
 
 /** =========================
- *  Header builder
- *  ========================= */
-function buildEpisodeLine(episodeIndex: number, subtitle: string) {
-  const n = episodeIndex + 1;
-  const t = subtitle.trim();
-  return t ? `제 ${n}화 · ${t}` : `제 ${n}화`;
-}
-
-function buildFullText(seriesTitle: string, episodeIndex: number, subtitle: string, body: string) {
-  const title = seriesTitle.trim() || "제목 없음";
-  const episodeLine = buildEpisodeLine(episodeIndex, subtitle);
-  // 제목(1줄) + 빈줄(1) + 회차줄(1줄) + 빈줄(2) + 본문
-  return `${title}\n\n${episodeLine}\n\n\n${body.trim()}`;
-}
-
-/** =========================
  *  Page
  *  ========================= */
 export default function Page() {
-  /** ✅ 패러디/웹소설 큰 제목(=시리즈 큰 제목) */
-  const [seriesTitle, setSeriesTitle] = useState("코난패러디소설");
-  /** ✅ 부제목(회차 설명) */
-  const [episodeSubtitle, setEpisodeSubtitle] = useState("");
-
-  /** ✅ 테스트용 회차(나중에 실제 원문으로 교체) */
+  /** ✅ 작품/회차 정보 (나중에 URL/목차로 교체) */
   const episodes = useMemo(
     () => [
       `Episode 1
@@ -294,33 +274,35 @@ Then a whisper: "You opened the door."`,
   );
 
   const [episodeIndex, setEpisodeIndex] = useState(0);
+  const [novelTitle, setNovelTitle] = useState("코난패러디소설"); // ✅ 큰 제목(=시리즈/작품명)
+  const [subtitle, setSubtitle] = useState(""); // ✅ 부제목(선택)
+
   const [source, setSource] = useState(episodes[0] ?? "");
-  const [translatedBody, setTranslatedBody] = useState(""); // ✅ 본문만(화면 표시용)
+  const [result, setResult] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<Progress>(null);
 
-  // ✅ 회차별 번역 캐시(본문만)
+  // ✅ 회차별 번역 캐시
   const [translatedCache, setTranslatedCache] = useState<Record<number, string>>({});
   const abortRef = useRef<AbortController | null>(null);
 
-  // ✅ 기록/폴더 UI
+  // ✅ 히스토리/폴더
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [tree, setTree] = useState<FolderNode>({ id: ROOT_ID, type: "folder", name: ROOT_NAME, children: [] });
-  const [selectedFolderId, setSelectedFolderId] = useState<string>(ROOT_ID); // 이동/정리 대상 폴더
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(ROOT_ID);
   const [expandedFolderIds, setExpandedFolderIds] = useState<Record<string, boolean>>({ [ROOT_ID]: true });
   const [newFolderName, setNewFolderName] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
 
-  // ✅ 드래그(PC)
-  const [draggingItemId, setDraggingItemId] = useState<string | null>(null);
-  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null);
+  // rename UI
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
 
   useEffect(() => {
-    const loaded = loadTree();
-    setTree(loaded);
+    setTree(loadTree());
     setSelectedFolderId(ROOT_ID);
-    setExpandedFolderIds((prev) => ({ ...prev, [ROOT_ID]: true }));
+    setExpandedFolderIds({ [ROOT_ID]: true });
   }, []);
 
   useEffect(() => {
@@ -354,39 +336,37 @@ Then a whisper: "You opened the door."`,
     abortRef.current?.abort();
   }
 
-  async function handleCopyFull() {
-    const full = buildFullText(seriesTitle, episodeIndex, episodeSubtitle, translatedBody);
+  async function handleCopy() {
     try {
-      await navigator.clipboard.writeText(full);
-      alert("번역본(제목/회차/부제목+본문)이 복사되었습니다.");
+      await navigator.clipboard.writeText(result);
+      alert("번역본이 복사되었습니다.");
     } catch {
       alert("복사에 실패했습니다. 브라우저 권한을 확인해주세요.");
     }
   }
 
-  /** ✅ 자동 저장: 번역 완료 시 히스토리(루트)에 시간순으로 쌓임 / 같은 회차는 업데이트 */
+  /** ✅ 자동 저장: 히스토리 최상단(루트)에 쌓임. 같은 회차는 최신으로 업데이트 */
   function autoSaveHistory(params: {
     episodeIndex: number;
     sourceText: string;
-    translatedBody: string;
-    seriesTitle: string;
-    episodeSubtitle: string;
+    translatedText: string;
   }) {
-    const key = `${params.seriesTitle.trim()}|${params.episodeIndex}`;
-
-    const itemName = `${params.seriesTitle.trim() || "제목 없음"} · 제 ${params.episodeIndex + 1}화`;
+    const key = `${novelTitle}|${params.episodeIndex}`;
+    const episodeLabel = `${params.episodeIndex + 1}화`;
+    const historyName = `${novelTitle} · ${episodeLabel}`; // ✅ 히스토리 표시명(간단히)
 
     const existing = findItemByKey(tree, key);
     if (existing) {
       const nextItem: ItemNode = {
         ...existing,
-        name: itemName,
+        name: historyName,
         createdAt: Date.now(),
-        seriesTitle: params.seriesTitle,
-        episodeIndex: params.episodeIndex,
-        episodeSubtitle: params.episodeSubtitle,
         sourceText: params.sourceText,
-        translatedBody: params.translatedBody,
+        translatedText: params.translatedText,
+        episodeLabel,
+        episodeIndex: params.episodeIndex,
+        novelTitle,
+        subtitle,
         key,
       };
       const nextTree = replaceItemById(tree, existing.id, nextItem);
@@ -397,17 +377,18 @@ Then a whisper: "You opened the door."`,
     const item: ItemNode = {
       id: uid(),
       type: "item",
-      name: itemName,
+      name: historyName,
       createdAt: Date.now(),
-      seriesTitle: params.seriesTitle,
+      novelTitle,
       episodeIndex: params.episodeIndex,
-      episodeSubtitle: params.episodeSubtitle,
+      episodeLabel,
+      subtitle,
       sourceText: params.sourceText,
-      translatedBody: params.translatedBody,
+      translatedText: params.translatedText,
       key,
     };
 
-    // ✅ 루트 맨 위에 추가(최신이 위)
+    // ✅ 루트 최상단에 추가(최근이 위)
     const nextTree = updateFolderChildren(tree, ROOT_ID, (children) => [item, ...children]);
     setTree(nextTree);
   }
@@ -416,16 +397,16 @@ Then a whisper: "You opened the door."`,
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // ✅ 캐시가 있으면 즉시 표시(본문만)
+    // ✅ 캐시 있으면 즉시 표시
     if (cacheKey !== undefined && translatedCache[cacheKey]) {
-      setTranslatedBody(translatedCache[cacheKey]);
+      setResult(translatedCache[cacheKey]);
       setError("");
       setProgress(null);
       return;
     }
 
     setIsLoading(true);
-    setTranslatedBody("");
+    setResult("");
     setError("");
 
     abortRef.current?.abort();
@@ -446,21 +427,15 @@ Then a whisper: "You opened the door."`,
         const translated = await translateOneChunk(chunks[i], controller.signal);
         if (!out) out = translated.trimEnd();
         else out += "\n\n" + translated.trimEnd();
-        setTranslatedBody(out);
+        setResult(out);
       }
 
       setProgress({ current: chunks.length, total: chunks.length });
-      setTranslatedBody(out);
+      setResult(out);
 
       if (cacheKey !== undefined) {
         setTranslatedCache((prev) => ({ ...prev, [cacheKey]: out }));
-        autoSaveHistory({
-          episodeIndex: cacheKey,
-          sourceText: trimmed,
-          translatedBody: out,
-          seriesTitle,
-          episodeSubtitle,
-        });
+        autoSaveHistory({ episodeIndex: cacheKey, sourceText: trimmed, translatedText: out });
       }
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -480,10 +455,10 @@ Then a whisper: "You opened the door."`,
     const nextText = episodes[nextIndex] ?? "";
     setEpisodeIndex(nextIndex);
     setSource(nextText);
-    setTranslatedBody("");
+    setResult("");
     setError("");
     setProgress(null);
-    void runTranslation(nextText, nextIndex); // ✅ 다음/이전화 누르면 자동 번역 + 자동저장
+    void runTranslation(nextText, nextIndex);
   }
 
   /** =========================
@@ -509,25 +484,6 @@ Then a whisper: "You opened the door."`,
     setExpandedFolderIds((prev) => ({ ...prev, [parentFolderId]: true, [newFolder.id]: true }));
   }
 
-  function renameFolder(folderId: string) {
-    if (folderId === ROOT_ID) return;
-    const node = findNodeById(tree, folderId);
-    if (!node || node.type !== "folder") return;
-
-    const current = node.name;
-    const next = prompt("폴더 이름을 수정하세요:", current);
-    if (next === null) return;
-
-    const trimmed = next.trim();
-    if (!trimmed) {
-      alert("이름은 비워둘 수 없어요.");
-      return;
-    }
-
-    const nextTree = renameFolderById(tree, folderId, trimmed);
-    setTree(nextTree);
-  }
-
   function moveSelectedItemToFolder(targetFolderId: string) {
     if (!selectedItemId) {
       alert("이동할 항목을 먼저 선택해 주세요.");
@@ -548,21 +504,8 @@ Then a whisper: "You opened the door."`,
     alert("이동 완료!");
   }
 
-  function moveItemByDrag(itemId: string, targetFolderId: string) {
-    const target = findNodeById(tree, targetFolderId);
-    if (!target || target.type !== "folder") return;
-
-    const { nextRoot, extracted } = extractNode(tree, itemId);
-    if (!extracted) return;
-
-    const nextTree = updateFolderChildren(nextRoot, targetFolderId, (children) => [extracted, ...children]);
-    setTree(nextTree);
-    setSelectedItemId(null);
-  }
-
   function deleteNodeById(nodeId: string) {
     if (nodeId === ROOT_ID) return;
-
     const ok = confirm("삭제할까요? (폴더면 안의 항목도 함께 삭제됩니다)");
     if (!ok) return;
 
@@ -571,56 +514,157 @@ Then a whisper: "You opened the door."`,
     if (selectedItemId === nodeId) setSelectedItemId(null);
   }
 
+  function startRename(folderId: string, currentName: string) {
+    setRenamingFolderId(folderId);
+    setRenameText(currentName);
+  }
+
+  function applyRename() {
+    if (!renamingFolderId) return;
+    const nextTree = renameFolderById(tree, renamingFolderId, renameText);
+    setTree(nextTree);
+    setRenamingFolderId(null);
+    setRenameText("");
+  }
+
   function loadItemToViewer(item: ItemNode) {
     setEpisodeIndex(item.episodeIndex);
-    setSeriesTitle(item.seriesTitle);
-    setEpisodeSubtitle(item.episodeSubtitle);
+    setNovelTitle(item.novelTitle);
+    setSubtitle(item.subtitle ?? "");
     setSource(item.sourceText);
-    setTranslatedBody(item.translatedBody);
+    setResult(item.translatedText);
     setError("");
     setProgress(null);
-    setTranslatedCache((prev) => ({ ...prev, [item.episodeIndex]: item.translatedBody }));
+    setTranslatedCache((prev) => ({ ...prev, [item.episodeIndex]: item.translatedText }));
     setIsHistoryOpen(false);
   }
 
   function FolderTree({ folder, depth }: { folder: FolderNode; depth: number }) {
     const isExpanded = !!expandedFolderIds[folder.id];
-    const isDropOver = dragOverFolderId === folder.id;
+    const isRoot = folder.id === ROOT_ID;
+
+    // ✅ 루트는 “UI상” 폴더 줄을 숨기고, children만 보여줌
+    if (isRoot) {
+      return (
+        <div style={{ marginTop: 6 }}>
+          {/* 최상단에는 루트 children만 표시 */}
+          {folder.children.length === 0 ? (
+            <div style={{ opacity: 0.6, fontSize: 13, padding: "10px 2px" }}>(아직 저장된 히스토리가 없어요)</div>
+          ) : (
+            folder.children.map((child) => {
+              if (child.type === "folder") return <FolderTree key={child.id} folder={child} depth={0} />;
+
+              const item = child as ItemNode;
+              const isSelected = selectedItemId === item.id;
+
+              return (
+                <div
+                  key={item.id}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "center",
+                    padding: "8px 10px",
+                    borderRadius: 10,
+                    border: isSelected ? "2px solid #888" : "1px solid #eee",
+                    background: "#fff",
+                    marginBottom: 8,
+                  }}
+                >
+                  <button
+                    onClick={() => setSelectedItemId(item.id)}
+                    style={{
+                      width: 34,
+                      height: 30,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                    title="이동할 항목으로 선택"
+                  >
+                    {isSelected ? "✔" : "○"}
+                  </button>
+
+                  <button
+                    onClick={() => loadItemToViewer(item)}
+                    style={{
+                      border: "none",
+                      background: "transparent",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      flex: 1,
+                    }}
+                    title="불러오기"
+                  >
+                    <div style={{ fontWeight: 900 }}>{item.name}</div>
+                    <div style={{ fontSize: 12, opacity: 0.65 }}>
+                      {formatDate(item.createdAt)}
+                      {item.subtitle ? ` · ${item.subtitle}` : ""}
+                    </div>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      navigator.clipboard
+                        .writeText(item.translatedText)
+                        .then(() => alert("저장된 번역본을 복사했어요."))
+                        .catch(() => alert("복사 실패(권한 확인)"));
+                    }}
+                    style={{
+                      width: 40,
+                      height: 30,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                    }}
+                    title="저장본 복사"
+                  >
+                    📋
+                  </button>
+
+                  <button
+                    onClick={() => deleteNodeById(item.id)}
+                    style={{
+                      width: 34,
+                      height: 30,
+                      borderRadius: 10,
+                      border: "1px solid #ddd",
+                      cursor: "pointer",
+                    }}
+                    title="항목 삭제"
+                  >
+                    🗑
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+      );
+    }
 
     return (
-      <div>
+      <div style={{ marginBottom: 10 }}>
         <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOverFolderId(folder.id);
-          }}
-          onDragLeave={() => {
-            setDragOverFolderId((cur) => (cur === folder.id ? null : cur));
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            if (draggingItemId) moveItemByDrag(draggingItemId, folder.id);
-            setDraggingItemId(null);
-            setDragOverFolderId(null);
-          }}
           style={{
             display: "flex",
             alignItems: "center",
             gap: 8,
-            padding: "6px 8px",
+            padding: "8px 10px",
             marginLeft: depth * 12,
             borderRadius: 10,
             background: selectedFolderId === folder.id ? "rgba(0,0,0,0.06)" : "transparent",
-            outline: isDropOver ? "2px dashed #888" : "none",
-            outlineOffset: 2,
+            border: "1px solid #eee",
           }}
         >
           <button
             onClick={() => toggleExpand(folder.id)}
             style={{
-              width: 28,
-              height: 28,
-              borderRadius: 8,
+              width: 34,
+              height: 30,
+              borderRadius: 10,
               border: "1px solid #ddd",
               cursor: "pointer",
               fontWeight: 900,
@@ -640,53 +684,47 @@ Then a whisper: "You opened the door."`,
               textAlign: "left",
               flex: 1,
             }}
-            title="정리(이동/생성) 대상 폴더 선택"
+            title="정리(이동) 대상 폴더 선택"
           >
-            📁 {folder.id === ROOT_ID ? ROOT_NAME : folder.name}
+            📁 {folder.name}
           </button>
 
-          {folder.id !== ROOT_ID && (
-            <>
-              <button
-                onClick={() => renameFolder(folder.id)}
-                style={{
-                  width: 34,
-                  height: 28,
-                  borderRadius: 8,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                }}
-                title="폴더 이름 수정"
-              >
-                ✏️
-              </button>
+          <button
+            onClick={() => startRename(folder.id, folder.name)}
+            style={{
+              width: 34,
+              height: 30,
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              cursor: "pointer",
+            }}
+            title="폴더 이름 수정"
+          >
+            ✏️
+          </button>
 
-              <button
-                onClick={() => deleteNodeById(folder.id)}
-                style={{
-                  width: 34,
-                  height: 28,
-                  borderRadius: 8,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                }}
-                title="폴더 삭제"
-              >
-                🗑
-              </button>
-            </>
-          )}
+          <button
+            onClick={() => deleteNodeById(folder.id)}
+            style={{
+              width: 34,
+              height: 30,
+              borderRadius: 10,
+              border: "1px solid #ddd",
+              cursor: "pointer",
+            }}
+            title="폴더 삭제"
+          >
+            🗑
+          </button>
         </div>
 
         {isExpanded && (
-          <div style={{ marginTop: 6 }}>
+          <div style={{ marginTop: 8 }}>
             {folder.children.length === 0 ? (
               <div style={{ marginLeft: depth * 12 + 44, opacity: 0.6, fontSize: 13, padding: "4px 0" }}>(비어 있음)</div>
             ) : (
               folder.children.map((child) => {
-                if (child.type === "folder") {
-                  return <FolderTree key={child.id} folder={child} depth={depth + 1} />;
-                }
+                if (child.type === "folder") return <FolderTree key={child.id} folder={child} depth={depth + 1} />;
 
                 const item = child as ItemNode;
                 const isSelected = selectedItemId === item.id;
@@ -698,19 +736,20 @@ Then a whisper: "You opened the door."`,
                       display: "flex",
                       gap: 8,
                       alignItems: "center",
-                      padding: "6px 8px",
-                      marginLeft: (depth + 1) * 12 + 32,
+                      padding: "8px 10px",
+                      marginLeft: (depth + 1) * 12 + 16,
                       borderRadius: 10,
                       border: isSelected ? "2px solid #888" : "1px solid #eee",
                       background: "#fff",
+                      marginBottom: 8,
                     }}
                   >
                     <button
                       onClick={() => setSelectedItemId(item.id)}
                       style={{
                         width: 34,
-                        height: 28,
-                        borderRadius: 8,
+                        height: 30,
+                        borderRadius: 10,
                         border: "1px solid #ddd",
                         cursor: "pointer",
                         fontWeight: 900,
@@ -719,31 +758,6 @@ Then a whisper: "You opened the door."`,
                     >
                       {isSelected ? "✔" : "○"}
                     </button>
-
-                    {/* ✅ 드래그 핸들(PC) */}
-                    <div
-                      draggable
-                      onDragStart={() => setDraggingItemId(item.id)}
-                      onDragEnd={() => {
-                        setDraggingItemId(null);
-                        setDragOverFolderId(null);
-                      }}
-                      title="드래그해서 폴더에 놓기(PC)"
-                      style={{
-                        width: 34,
-                        height: 28,
-                        borderRadius: 8,
-                        border: "1px solid #ddd",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        cursor: "grab",
-                        userSelect: "none",
-                        fontWeight: 900,
-                      }}
-                    >
-                      ≡
-                    </div>
 
                     <button
                       onClick={() => loadItemToViewer(item)}
@@ -758,27 +772,27 @@ Then a whisper: "You opened the door."`,
                     >
                       <div style={{ fontWeight: 900 }}>{item.name}</div>
                       <div style={{ fontSize: 12, opacity: 0.65 }}>
-                        {formatDate(item.createdAt)} · {buildEpisodeLine(item.episodeIndex, item.episodeSubtitle)}
+                        {formatDate(item.createdAt)}
+                        {item.subtitle ? ` · ${item.subtitle}` : ""}
                       </div>
                     </button>
 
                     <button
                       onClick={() => {
-                        const full = buildFullText(item.seriesTitle, item.episodeIndex, item.episodeSubtitle, item.translatedBody);
                         navigator.clipboard
-                          .writeText(full)
-                          .then(() => alert("저장된 번역본(헤더 포함)을 복사했어요."))
+                          .writeText(item.translatedText)
+                          .then(() => alert("저장된 번역본을 복사했어요."))
                           .catch(() => alert("복사 실패(권한 확인)"));
                       }}
                       style={{
                         width: 40,
-                        height: 28,
-                        borderRadius: 8,
+                        height: 30,
+                        borderRadius: 10,
                         border: "1px solid #ddd",
                         cursor: "pointer",
                         fontWeight: 900,
                       }}
-                      title="저장본 복사(헤더 포함)"
+                      title="저장본 복사"
                     >
                       📋
                     </button>
@@ -787,8 +801,8 @@ Then a whisper: "You opened the door."`,
                       onClick={() => deleteNodeById(item.id)}
                       style={{
                         width: 34,
-                        height: 28,
-                        borderRadius: 8,
+                        height: 30,
+                        borderRadius: 10,
                         border: "1px solid #ddd",
                         cursor: "pointer",
                       }}
@@ -806,48 +820,45 @@ Then a whisper: "You opened the door."`,
     );
   }
 
-  const episodeLine = buildEpisodeLine(episodeIndex, episodeSubtitle);
-  const fullTextForCopy = translatedBody.trim()
-    ? buildFullText(seriesTitle, episodeIndex, episodeSubtitle, translatedBody)
-    : "";
+  const episodeLabel = `${episodeIndex + 1}화`;
 
   return (
     <main style={{ maxWidth: 900, margin: "0 auto", padding: 24 }}>
       {/* 상단 바 */}
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 10 }}>
-        <div style={{ flex: 1 }}>
-          <h1 style={{ fontSize: 22, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
-          <div style={{ opacity: 0.7, marginTop: 6, fontSize: 13 }}>
-            번역하면 <b>히스토리</b>에 자동 저장됩니다 · {episodeIndex + 1}/{episodes.length}화
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <div>
+          <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
+          <div style={{ opacity: 0.7, marginTop: 4, fontSize: 13 }}>
+            자동 저장: <b>히스토리</b>에 시간순으로 쌓임 · 현재 회차: {episodeIndex + 1}/{episodes.length}
           </div>
         </div>
 
         <button
           onClick={() => setIsHistoryOpen(true)}
-          style={{ height: 40, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, marginTop: 2 }}
-          title="번역 기록"
+          style={{ height: 40, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
+          title="히스토리"
         >
           🗂 히스토리
         </button>
       </div>
 
-      {/* 메타 입력(제목/부제목) */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+      {/* 작품/부제목 입력 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
         <input
-          value={seriesTitle}
-          onChange={(e) => setSeriesTitle(e.target.value)}
-          placeholder="패러디/웹소설 제목(큰 제목)"
-          style={{ height: 40, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 280 }}
+          value={novelTitle}
+          onChange={(e) => setNovelTitle(e.target.value)}
+          placeholder="소설/시리즈 제목(큰 제목)"
+          style={{ height: 42, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd" }}
         />
         <input
-          value={episodeSubtitle}
-          onChange={(e) => setEpisodeSubtitle(e.target.value)}
-          placeholder="부제목(선택)"
-          style={{ height: 40, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 220 }}
+          value={subtitle}
+          onChange={(e) => setSubtitle(e.target.value)}
+          placeholder="부제목(선택) — 회차 뒤에 붙음"
+          style={{ height: 42, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd" }}
         />
       </div>
 
-      <div style={{ opacity: 0.75, marginBottom: 12, fontSize: 13 }}>
+      <div style={{ opacity: 0.75, marginBottom: 12 }}>
         예상 분할: {chunksPreview.chunksCount}조각 · 글자수: {chunksPreview.totalChars.toLocaleString()}자
       </div>
 
@@ -860,18 +871,11 @@ Then a whisper: "You opened the door."`,
         />
 
         {/* 번역 실행 */}
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
           <button
             onClick={() => runTranslation(source, episodeIndex)}
             disabled={isLoading}
-            style={{
-              height: 44,
-              padding: "0 14px",
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              cursor: isLoading ? "not-allowed" : "pointer",
-              fontWeight: 900,
-            }}
+            style={{ height: 44, padding: "0 14px", borderRadius: 10, border: "1px solid #ddd", cursor: isLoading ? "not-allowed" : "pointer", fontWeight: 900 }}
           >
             {isLoading ? "번역 중..." : "번역하기"}
           </button>
@@ -894,41 +898,45 @@ Then a whisper: "You opened the door."`,
 
         {error && <div style={{ color: "#c00", fontSize: 14 }}>{error}</div>}
 
-        {/* ✅ 결과 헤더(클로모 느낌) */}
+        {/* ✅ 결과: 소설 뷰어 스타일(제목+회차/부제목+본문 한 박스) */}
         <div
           style={{
-            border: "1px solid #ddd",
             borderRadius: 12,
-            padding: 14,
-            background: "#fafafa",
+            border: "1px solid #ddd",
+            background: "#fff",
+            padding: 18,
           }}
         >
-          <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1.25 }}>{seriesTitle.trim() || "제목 없음"}</div>
-          <div style={{ marginTop: 6, fontSize: 13, opacity: 0.75 }}>{episodeLine}</div>
+          <div style={{ fontSize: 34, fontWeight: 900, lineHeight: 1.15 }}>
+            {novelTitle.trim() ? novelTitle : "제목 없음"}
+          </div>
 
-          {/* 본문 시작 전 여백 충분히 */}
-          <div style={{ height: 16 }} />
+          <div style={{ marginTop: 10, fontSize: 14, opacity: 0.7 }}>
+            {episodeLabel}
+            {subtitle.trim() ? ` · ${subtitle.trim()}` : ""}
+          </div>
 
-          <textarea
-            value={translatedBody}
-            readOnly
-            placeholder="번역 결과(본문)가 여기 표시됩니다…"
+          {/* 여백(클로모처럼 충분히) */}
+          <div style={{ height: 28 }} />
+
+          <div
             style={{
-              width: "100%",
-              minHeight: 240,
-              padding: 12,
-              fontSize: 14,
-              borderRadius: 10,
-              border: "1px solid #ddd",
-              outline: "none",
-              background: "#fff",
               whiteSpace: "pre-wrap",
+              fontSize: 16,
+              lineHeight: 1.9,
+              minHeight: 240,
+              background: "#fafafa",
+              border: "1px solid #eee",
+              borderRadius: 10,
+              padding: 14,
             }}
-          />
+          >
+            {result.trim() ? result : "번역 결과가 여기 표시됩니다…"}
+          </div>
         </div>
 
         {/* 하단 네비 + 복사 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
           <button
             onClick={() => goToEpisode(episodeIndex - 1)}
             disabled={!hasPrev || isLoading}
@@ -946,17 +954,17 @@ Then a whisper: "You opened the door."`,
           </button>
 
           <button
-            onClick={handleCopyFull}
-            disabled={!fullTextForCopy}
-            title="번역본 복사(제목/회차/부제목+본문)"
+            onClick={handleCopy}
+            disabled={!result.trim()}
+            title="번역본 복사"
             style={{
               height: 42,
               width: 48,
               borderRadius: 10,
               border: "1px solid #ddd",
-              cursor: !fullTextForCopy ? "not-allowed" : "pointer",
+              cursor: !result.trim() ? "not-allowed" : "pointer",
               fontWeight: 900,
-              opacity: !fullTextForCopy ? 0.5 : 1,
+              opacity: !result.trim() ? 0.5 : 1,
             }}
           >
             📋
@@ -1013,9 +1021,9 @@ Then a whisper: "You opened the door."`,
           >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리 (자동 저장됨)</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
-                  1) 번역하면 시간순으로 쌓임 → 2) 폴더 생성 → 3) 항목 선택(○) 후 “선택 폴더로 이동” 또는 드래그(≡)
+                  1) 번역하면 히스토리에 자동 저장 → 2) 폴더 만들기 → 3) 항목 선택(○) 후 “선택 폴더로 이동”
                 </div>
               </div>
 
@@ -1067,7 +1075,34 @@ Then a whisper: "You opened the door."`,
               </div>
             </div>
 
-            {/* 트리(루트 = 히스토리만) */}
+            {/* 폴더 이름 수정 모드 */}
+            {renamingFolderId && (
+              <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+                <input
+                  value={renameText}
+                  onChange={(e) => setRenameText(e.target.value)}
+                  placeholder="폴더 이름 수정"
+                  style={{ height: 38, padding: "0 10px", borderRadius: 10, border: "1px solid #ddd", minWidth: 280 }}
+                />
+                <button
+                  onClick={applyRename}
+                  style={{ height: 38, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
+                >
+                  저장
+                </button>
+                <button
+                  onClick={() => {
+                    setRenamingFolderId(null);
+                    setRenameText("");
+                  }}
+                  style={{ height: 38, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900 }}
+                >
+                  취소
+                </button>
+              </div>
+            )}
+
+            {/* 트리(루트는 숨김 처리됨) */}
             <FolderTree folder={tree} depth={0} />
           </div>
         </div>
