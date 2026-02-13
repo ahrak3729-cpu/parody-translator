@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /* =========================
    자동 분할 (긴 글 대응)
@@ -51,7 +51,7 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // 본문만 저장
+  translatedText: string; // ✅ 본문만 저장 (헤더는 showHeader로 표시만)
   url?: string;
 
   folderId?: string | null;
@@ -65,43 +65,8 @@ type HistoryFolder = {
   parentId: string | null;
 };
 
-const STORAGE_KEY = "parody_translator_history_v3";
-const FOLDERS_KEY = "parody_translator_history_folders_v2";
-
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function loadHistory(): HistoryItem[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => x && typeof x === "object" && typeof x.id === "string");
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(items: HistoryItem[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-}
-
-function loadFolders(): HistoryFolder[] {
-  try {
-    const raw = localStorage.getItem(FOLDERS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => x && typeof x.id === "string" && typeof x.name === "string");
-  } catch {
-    return [];
-  }
-}
-
-function saveFolders(folders: HistoryFolder[]) {
-  localStorage.setItem(FOLDERS_KEY, JSON.stringify(folders));
 }
 
 function formatDate(ts: number) {
@@ -136,6 +101,63 @@ async function safeReadJson(res: Response) {
 }
 
 /* =========================
+   IndexedDB (영구 저장)
+   - localStorage 완전 제거 버전
+========================= */
+const DB_NAME = "parody_translator_db";
+const DB_VERSION = 1;
+const STORE_HISTORY = "history";
+const STORE_FOLDERS = "folders";
+
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+
+    req.onupgradeneeded = () => {
+      const db = req.result;
+
+      if (!db.objectStoreNames.contains(STORE_HISTORY)) {
+        db.createObjectStore(STORE_HISTORY, { keyPath: "id" });
+      }
+      if (!db.objectStoreNames.contains(STORE_FOLDERS)) {
+        db.createObjectStore(STORE_FOLDERS, { keyPath: "id" });
+      }
+    };
+
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbGetAll<T>(storeName: string): Promise<T[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readonly");
+    const store = tx.objectStore(storeName);
+    const req = store.getAll();
+    req.onsuccess = () => resolve((req.result || []) as T[]);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbReplaceAll<T extends { id: string }>(storeName: string, items: T[]): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeName, "readwrite");
+    const store = tx.objectStore(storeName);
+
+    const clearReq = store.clear();
+    clearReq.onerror = () => reject(clearReq.error);
+
+    clearReq.onsuccess = () => {
+      for (const it of items) store.put(it);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+
+/* =========================
    작은 메뉴 버튼
 ========================= */
 function MenuButton(props: { label: string; onClick: () => void; disabled?: boolean }) {
@@ -161,28 +183,12 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
   );
 }
 
-function isPixivUrl(u: string) {
-  try {
-    const x = new URL(u);
-    const h = x.hostname.toLowerCase();
-    return h === "www.pixiv.net" || h.endsWith(".pixiv.net") || h === "pixiv.net";
-  } catch {
-    return false;
-  }
-}
-
 export default function Page() {
   /* =========================
      URL 중심
   ========================= */
   const [url, setUrl] = useState("");
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
-
-  /* =========================
-     설정(⚙️) - 쿠키는 "세션에서만"
-  ========================= */
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [pixivCookie, setPixivCookie] = useState(""); // ✅ 로컬저장 안 함(세션 상태만)
 
   /* =========================
      텍스트 직접 번역: 접기/펴기
@@ -213,26 +219,17 @@ export default function Page() {
   ========================= */
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    if (typeof window === "undefined") return [];
-    return loadHistory().sort((a, b) => b.createdAt - a.createdAt);
-  });
-
-  const [folders, setFolders] = useState<HistoryFolder[]>(() => {
-    if (typeof window === "undefined") return [];
-    return loadFolders().sort((a, b) => a.createdAt - b.createdAt);
-  });
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [folders, setFolders] = useState<HistoryFolder[]>([]);
 
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // 전체(null) 또는 현재 폴더
 
-  // 전체(null) 또는 현재 폴더
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
-
-  // ✅ + 메뉴 팝업: 모달 밖 fixed 레이어로 띄우기 위해 좌표 저장
+  // ✅ + 메뉴 팝업(모달 잘림 방지 fixed)
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null);
 
-  // ✅ 파일 선택 모드: 토글 버튼으로만 켜기
+  // ✅ 파일 선택 모드
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
 
@@ -243,6 +240,43 @@ export default function Page() {
   // 페이지네이션
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
+
+  // ✅ 설정 아이콘(옆 배치 요청 반영)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  /* =========================
+     최초 로드: IndexedDB → state
+  ========================= */
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      try {
+        const [h, f] = await Promise.all([
+          dbGetAll<HistoryItem>(STORE_HISTORY),
+          dbGetAll<HistoryFolder>(STORE_FOLDERS),
+        ]);
+
+        if (!alive) return;
+
+        const nextHistory = (h || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        const nextFolders = (f || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+        setHistory(nextHistory);
+        setFolders(nextFolders);
+
+        setCurrentHistoryId(nextHistory[0]?.id ?? null);
+      } catch (e: any) {
+        // DB 접근 실패해도 앱은 죽지 않게
+        console.error(e);
+        setError("저장소(IndexedDB) 로드에 실패했어요. 브라우저 설정을 확인해줘.");
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
@@ -301,18 +335,24 @@ export default function Page() {
 
   const selectedCount = useMemo(() => Object.values(selectedIds).filter(Boolean).length, [selectedIds]);
 
-  function persistHistory(next: HistoryItem[]) {
+  async function persistHistory(next: HistoryItem[]) {
     setHistory(next);
     try {
-      saveHistory(next);
-    } catch {}
+      await dbReplaceAll<HistoryItem>(STORE_HISTORY, next);
+    } catch (e) {
+      console.error(e);
+      alert("히스토리 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
+    }
   }
 
-  function persistFolders(next: HistoryFolder[]) {
+  async function persistFolders(next: HistoryFolder[]) {
     setFolders(next);
     try {
-      saveFolders(next);
-    } catch {}
+      await dbReplaceAll<HistoryFolder>(STORE_FOLDERS, next);
+    } catch (e) {
+      console.error(e);
+      alert("폴더 저장에 실패했어요. (IndexedDB 제한/차단 가능)");
+    }
   }
 
   function folderNameById(id: string | null) {
@@ -377,7 +417,7 @@ export default function Page() {
   /* =========================
      폴더 액션
   ========================= */
-  function createFolderNested() {
+  async function createFolderNested() {
     const name = prompt("새 폴더 이름을 입력해줘");
     if (!name) return;
     const trimmed = name.trim();
@@ -387,15 +427,15 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       name: trimmed,
-      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성
+      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성 (폴더 안 폴더 OK)
     };
 
-    const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
-    persistFolders(next);
+    const next = [...folders, f].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    await persistFolders(next);
     setHistoryPage(1);
   }
 
-  function renameCurrentFolder() {
+  async function renameCurrentFolder() {
     if (selectedFolderId === null) {
       alert("‘전체’는 이름을 바꿀 수 없어.");
       return;
@@ -409,10 +449,10 @@ export default function Page() {
     if (!trimmed) return;
 
     const next = folders.map((x) => (x.id === f.id ? { ...x, name: trimmed } : x));
-    persistFolders(next);
+    await persistFolders(next);
   }
 
-  function deleteCurrentFolder() {
+  async function deleteCurrentFolder() {
     if (selectedFolderId === null) {
       alert("‘전체’는 삭제할 수 없어.");
       return;
@@ -426,10 +466,10 @@ export default function Page() {
     const idsToDelete = collectDescFolderIds(f.id);
 
     const nextFolders = folders.filter((x) => !idsToDelete.includes(x.id));
-    persistFolders(nextFolders);
-
     const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
-    persistHistory(nextHistory);
+
+    await persistFolders(nextFolders);
+    await persistHistory(nextHistory);
 
     setSelectedFolderId(f.parentId);
     setHistoryPage(1);
@@ -456,19 +496,19 @@ export default function Page() {
     setMovePickerOpen(true);
   }
 
-  function moveSelectedToFolder(targetFolderId: string | null) {
+  async function moveSelectedToFolder(targetFolderId: string | null) {
     const ids = getSelectedItemIds();
     if (ids.length === 0) return;
 
     const next = history.map((h) => (ids.includes(h.id) ? { ...h, folderId: targetFolderId } : h));
-    persistHistory(next);
+    await persistHistory(next);
 
     setMovePickerOpen(false);
     alert(`이동 완료: "${folderNameById(targetFolderId)}"`);
     disableSelectMode();
   }
 
-  function deleteSelectedItems() {
+  async function deleteSelectedItems() {
     const ids = getSelectedItemIds();
     if (ids.length === 0) {
       alert("삭제할 번역본을 먼저 체크해줘.");
@@ -479,7 +519,7 @@ export default function Page() {
     if (!ok) return;
 
     const next = history.filter((h) => !ids.includes(h.id));
-    persistHistory(next);
+    await persistHistory(next);
 
     const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
@@ -549,7 +589,7 @@ export default function Page() {
     return String((data as any)?.translated ?? "");
   }
 
-  function autoSaveToHistory(params: {
+  async function autoSaveToHistory(params: {
     sourceText: string;
     translatedBody: string;
     url?: string;
@@ -571,8 +611,8 @@ export default function Page() {
       showHeader: params.showHeader,
     };
 
-    const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
-    persistHistory(next);
+    const next = [item, ...history].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    await persistHistory(next);
     setCurrentHistoryId(item.id);
     setHistoryPage(1);
   }
@@ -614,10 +654,10 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      const nextShowHeader = mode === "url";
+      const nextShowHeader = mode === "url"; // ✅ URL만 헤더 표시
       setShowHeader(nextShowHeader);
 
-      autoSaveToHistory({
+      await autoSaveToHistory({
         sourceText: text.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
@@ -637,7 +677,6 @@ export default function Page() {
 
   /* =========================
      URL → 본문 불러오기
-     - Pixiv면 pixivCookie(세션값) 같이 보냄
   ========================= */
   async function fetchFromUrl() {
     const u = url.trim();
@@ -647,16 +686,10 @@ export default function Page() {
     setError("");
 
     try {
-      const pixiv = isPixivUrl(u);
-      const body: any = { url: u };
-
-      // ✅ pixiv만 쿠키 옵션 전달
-      if (pixiv && pixivCookie.trim()) body.pixivCookie = pixivCookie.trim();
-
       const res = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ url: u }),
       });
 
       const data: any = await safeReadJson(res);
@@ -668,7 +701,7 @@ export default function Page() {
 
       if (data?.__notJson) {
         throw new Error(
-          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(설정(⚙️)에서 Pixiv 쿠키를 넣거나, 텍스트 직접 붙여넣기로 확인해줘)"
+          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(다른 사이트로 테스트하거나, 텍스트 직접 붙여넣기로 확인해줘)"
         );
       }
 
@@ -676,7 +709,7 @@ export default function Page() {
       const text = String(data?.text ?? "");
       if (!text.trim()) {
         throw new Error(
-          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n설정(⚙️)에서 Pixiv 쿠키를 넣거나, 텍스트 직접 붙여넣기로 먼저 확인해줘."
+          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
         );
       }
 
@@ -695,7 +728,7 @@ export default function Page() {
   function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
     const right = Math.max(12, window.innerWidth - rect.right);
-    const bottom = Math.max(12, window.innerHeight - rect.top);
+    const bottom = Math.max(12, window.innerHeight - rect.top); // 버튼 위로 메뉴
     setMenuAnchor({ right, bottom });
     setMenuOpen(true);
   }
@@ -709,18 +742,17 @@ export default function Page() {
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
-          <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임</div>
+          <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임 (영구 저장)</div>
         </div>
 
-        {/* ✅ 오른쪽: 히스토리(☰) + 설정(⚙️) */}
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {/* 히스토리: ☰ 아이콘만 */}
           <button
             onClick={() => {
               setHistoryOpen(true);
               setHistoryPage(1);
               setMenuOpen(false);
               setMenuAnchor(null);
-              setSettingsOpen(false);
             }}
             style={{
               width: 44,
@@ -738,6 +770,7 @@ export default function Page() {
             ☰
           </button>
 
+          {/* ✅ 설정 아이콘(요청대로 히스토리 옆) */}
           <button
             onClick={() => setSettingsOpen(true)}
             style={{
@@ -785,11 +818,7 @@ export default function Page() {
       </div>
 
       {/* 텍스트 직접 번역 */}
-      <details
-        open={manualOpen}
-        onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
-        style={{ marginBottom: 12 }}
-      >
+      <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
         <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
         <div style={{ marginTop: 10 }}>
@@ -885,7 +914,7 @@ export default function Page() {
       </div>
 
       {/* =========================
-          ✅ Settings Modal (쿠키 세션 전용)
+          Settings Modal (일단 틀만)
          ========================= */}
       {settingsOpen && (
         <div
@@ -899,7 +928,7 @@ export default function Page() {
             alignItems: "center",
             justifyContent: "center",
             padding: 16,
-            zIndex: 10050,
+            zIndex: 10002,
           }}
           onClick={() => setSettingsOpen(false)}
         >
@@ -915,76 +944,24 @@ export default function Page() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-              <div>
-                <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
-                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                  Pixiv은 로그인/봇 차단 때문에 서버 추출이 막힐 수 있어. 필요할 때만 쿠키를 넣어줘.
-                  <br />
-                  ⚠️ 이 쿠키는 <b>로컬 저장 안 하고</b> 지금 세션에서만 사용해.
-                </div>
-              </div>
-
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
               <button
                 onClick={() => setSettingsOpen(false)}
-                style={{
-                  height: 36,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: "#fff",
-                }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
               >
                 닫기
               </button>
             </div>
-
-            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-              <div style={{ fontWeight: 900, marginBottom: 8 }}>Pixiv 쿠키 (선택)</div>
-              <textarea
-                value={pixivCookie}
-                onChange={(e) => setPixivCookie(e.target.value)}
-                placeholder="예) PHPSESSID=...; device_token=...; (긴 문자열)"
-                style={{
-                  width: "100%",
-                  minHeight: 120,
-                  padding: 12,
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  whiteSpace: "pre-wrap",
-                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-                  fontSize: 12,
-                }}
-              />
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
-                <button
-                  onClick={() => setPixivCookie("")}
-                  style={{
-                    height: 38,
-                    padding: "0 14px",
-                    borderRadius: 10,
-                    border: "1px solid #ddd",
-                    cursor: "pointer",
-                    fontWeight: 900,
-                    background: "#fff",
-                  }}
-                >
-                  입력 지우기
-                </button>
-
-                <div style={{ fontSize: 12, opacity: 0.7, alignSelf: "center" }}>
-                  상태: {pixivCookie.trim() ? "쿠키 입력됨(세션)" : "비어 있음"}
-                </div>
-              </div>
+            <div style={{ marginTop: 10, opacity: 0.75, lineHeight: 1.6 }}>
+              (여기는 다음 단계에서 폰트/글자크기/배경이미지 URL 같은 “보기 서식” 옵션을 넣는 자리로 비워뒀어.)
             </div>
           </div>
         </div>
       )}
 
       {/* =========================
-          History Modal (원본 그대로)
+          History Modal
          ========================= */}
       {historyOpen && (
         <div
@@ -1256,7 +1233,7 @@ export default function Page() {
               </>
             )}
 
-            {/* ✅ 하단 오른쪽: 선택모드일 때만 이동/삭제 버튼이 + 왼쪽에 등장 */}
+            {/* 하단 오른쪽: 선택모드일 때 이동/삭제 버튼 + 메뉴(➕) */}
             <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
               {selectMode && (
                 <>
@@ -1302,7 +1279,6 @@ export default function Page() {
                 </>
               )}
 
-              {/* + 버튼 */}
               <button
                 onClick={(e) => openMenuFromButton(e)}
                 style={{
@@ -1329,7 +1305,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* ✅ + 메뉴 팝업 (fixed 레이어) */}
+      {/* + 메뉴 팝업 (fixed 레이어) */}
       {historyOpen && menuOpen && menuAnchor && (
         <div
           style={{ position: "fixed", inset: 0, zIndex: 10001 }}
