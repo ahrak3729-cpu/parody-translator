@@ -51,20 +51,18 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // ✅ "본문만" 저장 (수동 번역도 안전)
+  translatedText: string; // "본문만" 저장
   url?: string;
 
-  folderId?: string | null; // 현재 저장 폴더
-  showHeader?: boolean; // ✅ 뷰어에서 헤더 표시 여부(수동 번역은 false)
+  folderId?: string | null; // 저장 폴더
+  showHeader?: boolean; // 뷰어에서 헤더 표시 여부(수동 번역은 false)
 };
 
 type HistoryFolder = {
   id: string;
   createdAt: number;
   name: string;
-
-  // ✅ 폴더 안 폴더 지원
-  parentId: string | null;
+  parentId: string | null; // ✅ 폴더 안 폴더
 };
 
 const STORAGE_KEY = "parody_translator_history_v3";
@@ -150,7 +148,7 @@ export default function Page() {
   const [manualOpen, setManualOpen] = useState(false);
 
   /* =========================
-     메타(기본값만)
+     메타(기본값)
   ========================= */
   const [seriesTitle, setSeriesTitle] = useState("패러디소설");
   const [episodeNo, setEpisodeNo] = useState(1);
@@ -160,8 +158,8 @@ export default function Page() {
      원문 / 결과
   ========================= */
   const [source, setSource] = useState("");
-  const [resultBody, setResultBody] = useState(""); // ✅ 본문만 저장
-  const [showHeader, setShowHeader] = useState(false); // ✅ 화면에서 헤더 표시 여부
+  const [resultBody, setResultBody] = useState("");
+  const [showHeader, setShowHeader] = useState(false);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
@@ -169,7 +167,7 @@ export default function Page() {
   const abortRef = useRef<AbortController | null>(null);
 
   /* =========================
-     History UI + 네비
+     History / 폴더
   ========================= */
   const [historyOpen, setHistoryOpen] = useState(false);
 
@@ -179,18 +177,18 @@ export default function Page() {
   });
   const [currentHistoryId, setCurrentHistoryId] = useState<string | null>(null);
 
-  /* =========================
-     폴더 (중첩 지원)
-  ========================= */
   const [folders, setFolders] = useState<HistoryFolder[]>(() => {
     if (typeof window === "undefined") return [];
     return loadFolders().sort((a, b) => a.createdAt - b.createdAt);
   });
 
-  // ✅ "전체"는 null, 그 외는 현재 폴더 컨텍스트
+  // 전체(null) or 현재 폴더 컨텍스트
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
-  // ✅ 페이지네이션
+  // 이동 UI: 선택한 항목
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+
+  // 페이지네이션
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
 
@@ -215,23 +213,17 @@ export default function Page() {
   const canPrev = currentIndex >= 0 && currentIndex < history.length - 1;
   const canNext = currentIndex > 0;
 
-  // ✅ 현재 폴더의 "서브폴더 목록"
   const currentSubFolders = useMemo(() => {
-    if (selectedFolderId === null) {
-      // 최상위: parentId=null 인 폴더만 노출
-      return folders.filter((f) => f.parentId === null);
-    }
+    if (selectedFolderId === null) return folders.filter((f) => f.parentId === null);
     return folders.filter((f) => f.parentId === selectedFolderId);
   }, [folders, selectedFolderId]);
 
-  // ✅ 현재 폴더의 부모
   const parentFolderId = useMemo(() => {
     if (selectedFolderId === null) return null;
     const me = folders.find((f) => f.id === selectedFolderId);
     return me?.parentId ?? null;
   }, [folders, selectedFolderId]);
 
-  // ✅ breadcrumb 경로
   const breadcrumb = useMemo(() => {
     if (selectedFolderId === null) return ["전체"];
     const path: string[] = [];
@@ -247,7 +239,6 @@ export default function Page() {
     return path;
   }, [folders, selectedFolderId]);
 
-  // ✅ 폴더 필터된 히스토리(현재 폴더에 속한 항목만)
   const filteredHistory = useMemo(() => {
     if (selectedFolderId === null) return history;
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
@@ -262,6 +253,147 @@ export default function Page() {
     return filteredHistory.slice(start, start + PAGE_SIZE);
   }, [filteredHistory, historyPage]);
 
+  function persistHistory(next: HistoryItem[]) {
+    setHistory(next);
+    try {
+      saveHistory(next);
+    } catch {}
+  }
+
+  function persistFolders(next: HistoryFolder[]) {
+    setFolders(next);
+    try {
+      saveFolders(next);
+    } catch {}
+  }
+
+  /* =========================
+     폴더 유틸 (재귀)
+  ========================= */
+  function collectDescFolderIds(rootId: string): string[] {
+    // rootId 포함, 모든 하위 폴더 id 수집
+    const result: string[] = [rootId];
+    const stack: string[] = [rootId];
+
+    while (stack.length) {
+      const cur = stack.pop()!;
+      const children = folders.filter((f) => f.parentId === cur);
+      for (const c of children) {
+        result.push(c.id);
+        stack.push(c.id);
+      }
+    }
+    return result;
+  }
+
+  function folderNameById(id: string | null) {
+    if (id === null) return "전체";
+    const f = folders.find((x) => x.id === id);
+    return f ? f.name : "알 수 없는 폴더";
+  }
+
+  /* =========================
+     폴더 액션
+  ========================= */
+  function createFolder() {
+    const name = prompt("새 폴더 이름을 입력해줘");
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const f: HistoryFolder = {
+      id: uid(),
+      createdAt: Date.now(),
+      name: trimmed,
+      parentId: selectedFolderId,
+    };
+
+    const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
+    persistFolders(next);
+
+    setSelectedFolderId(f.id);
+    setHistoryPage(1);
+  }
+
+  function renameCurrentFolder() {
+    if (selectedFolderId === null) {
+      alert("‘전체’는 이름을 바꿀 수 없어.");
+      return;
+    }
+    const f = folders.find((x) => x.id === selectedFolderId);
+    if (!f) return;
+
+    const nextName = prompt("폴더 이름 수정", f.name);
+    if (!nextName) return;
+    const trimmed = nextName.trim();
+    if (!trimmed) return;
+
+    const next = folders.map((x) => (x.id === f.id ? { ...x, name: trimmed } : x));
+    persistFolders(next);
+  }
+
+  function deleteCurrentFolder() {
+    if (selectedFolderId === null) {
+      alert("‘전체’는 삭제할 수 없어.");
+      return;
+    }
+
+    const f = folders.find((x) => x.id === selectedFolderId);
+    if (!f) return;
+
+    const ok = confirm(
+      `폴더 "${f.name}" 를 삭제할까요?\n하위 폴더/그 안의 항목도 함께 삭제됩니다.`
+    );
+    if (!ok) return;
+
+    const idsToDelete = collectDescFolderIds(f.id);
+
+    // 폴더 삭제
+    const nextFolders = folders.filter((x) => !idsToDelete.includes(x.id));
+    persistFolders(nextFolders);
+
+    // 해당 폴더들에 속한 히스토리 항목 삭제
+    const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
+    persistHistory(nextHistory);
+
+    // 현재 위치를 상위로
+    setSelectedFolderId(f.parentId);
+    setHistoryPage(1);
+    setSelectedItemId(null);
+  }
+
+  function goUpFolder() {
+    if (selectedFolderId === null) return;
+    setSelectedFolderId(parentFolderId);
+    setHistoryPage(1);
+    setSelectedItemId(null);
+  }
+
+  /* =========================
+     항목 이동
+  ========================= */
+  function moveSelectedItemToFolder(targetFolderId: string | null) {
+    if (!selectedItemId) {
+      alert("이동할 항목을 먼저 선택(○)해줘.");
+      return;
+    }
+
+    const item = history.find((h) => h.id === selectedItemId);
+    if (!item) return;
+
+    const next = history.map((h) =>
+      h.id === selectedItemId ? { ...h, folderId: targetFolderId } : h
+    );
+    persistHistory(next);
+
+    // 이동 후 선택 해제
+    setSelectedItemId(null);
+    alert(`이동 완료: "${folderNameById(targetFolderId)}"`);
+  }
+
+  /* =========================
+     번역 API
+  ========================= */
   async function translateChunk(text: string, signal: AbortSignal) {
     const res = await fetch("/api/translate", {
       method: "POST",
@@ -276,20 +408,6 @@ export default function Page() {
       throw new Error(String(msg));
     }
     return String((data as any)?.translated ?? "");
-  }
-
-  function persistHistory(next: HistoryItem[]) {
-    setHistory(next);
-    try {
-      saveHistory(next);
-    } catch {}
-  }
-
-  function persistFolders(next: HistoryFolder[]) {
-    setFolders(next);
-    try {
-      saveFolders(next);
-    } catch {}
   }
 
   function autoSaveToHistory(params: {
@@ -308,7 +426,7 @@ export default function Page() {
       episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
       subtitle: params.subtitle.trim(),
       sourceText: params.sourceText,
-      translatedText: params.translatedBody, // ✅ 본문만 저장
+      translatedText: params.translatedBody,
       url: params.url?.trim() || undefined,
       folderId: selectedFolderId || null,
       showHeader: params.showHeader,
@@ -326,7 +444,7 @@ export default function Page() {
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
     setResultBody(it.translatedText || "");
-    setShowHeader(!!it.showHeader); // ✅ 저장된 표시 규칙을 그대로 사용
+    setShowHeader(!!it.showHeader);
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
@@ -340,7 +458,8 @@ export default function Page() {
     const next = history.filter((h) => h.id !== id);
     persistHistory(next);
 
-    const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
+    const nextFiltered =
+      selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
@@ -352,6 +471,8 @@ export default function Page() {
         setResultBody("");
       }
     }
+
+    if (selectedItemId === id) setSelectedItemId(null);
   }
 
   async function handleCopy(text: string) {
@@ -380,40 +501,7 @@ export default function Page() {
   }
 
   /* =========================
-     ✅ 폴더 생성 (현재 폴더 안에 생성)
-  ========================= */
-  function createFolder() {
-    const name = prompt("새 폴더 이름을 입력해줘");
-    if (!name) return;
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const f: HistoryFolder = {
-      id: uid(),
-      createdAt: Date.now(),
-      name: trimmed,
-      parentId: selectedFolderId, // ✅ 핵심: 현재 폴더 안에 생성
-    };
-
-    const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
-    persistFolders(next);
-
-    // 만든 폴더로 바로 들어가기
-    setSelectedFolderId(f.id);
-    setHistoryPage(1);
-  }
-
-  function goUpFolder() {
-    // 전체면 아무것도 안 함
-    if (selectedFolderId === null) return;
-    setSelectedFolderId(parentFolderId); // parentId가 null이면 최상위(=전체의 폴더목록)로
-    setHistoryPage(1);
-  }
-
-  /* =========================
      번역 실행
-     - ✅ manual: 헤더 표시/저장 안 함
-     - ✅ url: 헤더 표시/저장 함
   ========================= */
   async function runTranslation(text: string, opts?: { mode: "manual" | "url"; sourceUrl?: string }) {
     if (!text.trim()) return;
@@ -442,11 +530,9 @@ export default function Page() {
         out += (out ? "\n\n" : "") + t.trim();
       }
 
-      // ✅ 결과는 "본문만" 유지
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 화면 헤더 표시 여부
       const nextShowHeader = mode === "url";
       setShowHeader(nextShowHeader);
 
@@ -507,8 +593,6 @@ export default function Page() {
       }
 
       setSource(text);
-
-      // ✅ URL은 헤더 표시 모드
       await runTranslation(text, { mode: "url", sourceUrl: u });
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
@@ -517,6 +601,9 @@ export default function Page() {
     }
   }
 
+  /* =========================
+     UI
+  ========================= */
   return (
     <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86 }}>
       {/* 상단바 */}
@@ -660,14 +747,12 @@ export default function Page() {
             <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
           ) : (
             <>
-              {/* ✅ showHeader=true일 때만 제목/회차 표시 */}
               {showHeader && (
                 <>
                   <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
                   <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
                 </>
               )}
-
               <div style={{ fontSize: 16 }}>{resultBody}</div>
             </>
           )}
@@ -716,26 +801,19 @@ export default function Page() {
 
               <button
                 onClick={() => setHistoryOpen(false)}
-                style={{
-                  height: 36,
-                  padding: "0 12px",
-                  borderRadius: 10,
-                  border: "1px solid #ddd",
-                  cursor: "pointer",
-                  fontWeight: 900,
-                  background: "#fff",
-                }}
+                style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
               >
                 닫기
               </button>
             </div>
 
-            {/* ✅ 상위로 */}
+            {/* 폴더 상단 컨트롤 */}
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
               <button
                 onClick={() => {
                   setSelectedFolderId(null);
                   setHistoryPage(1);
+                  setSelectedItemId(null);
                 }}
                 style={{
                   height: 34,
@@ -769,9 +847,101 @@ export default function Page() {
               >
                 ⬅ 상위
               </button>
+
+              {/* ✅ 폴더 리네임/삭제(현재 폴더에서만) */}
+              <button
+                onClick={renameCurrentFolder}
+                disabled={selectedFolderId === null}
+                style={{
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 999,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: selectedFolderId === null ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: selectedFolderId === null ? 0.5 : 1,
+                }}
+                title="폴더 이름 수정"
+              >
+                ✏️ 폴더 이름
+              </button>
+
+              <button
+                onClick={deleteCurrentFolder}
+                disabled={selectedFolderId === null}
+                style={{
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 999,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: selectedFolderId === null ? "not-allowed" : "pointer",
+                  fontWeight: 900,
+                  opacity: selectedFolderId === null ? 0.5 : 1,
+                }}
+                title="폴더 삭제"
+              >
+                🗑 폴더 삭제
+              </button>
             </div>
 
-            {/* ✅ 서브폴더 목록 */}
+            {/* ✅ 항목 이동 바 */}
+            <div
+              style={{
+                border: "1px solid #eee",
+                borderRadius: 12,
+                padding: 10,
+                marginBottom: 12,
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                flexWrap: "wrap",
+                background: "#fafafa",
+              }}
+            >
+              <div style={{ fontSize: 13, opacity: 0.8 }}>
+                이동할 항목: <b>{selectedItemId ? "선택됨" : "없음"}</b>
+              </div>
+
+              <button
+                onClick={() => moveSelectedItemToFolder(selectedFolderId)}
+                disabled={!selectedItemId}
+                style={{
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: selectedItemId ? "pointer" : "not-allowed",
+                  fontWeight: 900,
+                  opacity: selectedItemId ? 1 : 0.5,
+                }}
+                title="현재 폴더로 이동"
+              >
+                📦 현재 폴더로 이동
+              </button>
+
+              <button
+                onClick={() => moveSelectedItemToFolder(null)}
+                disabled={!selectedItemId}
+                style={{
+                  height: 34,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  background: "#fff",
+                  cursor: selectedItemId ? "pointer" : "not-allowed",
+                  fontWeight: 900,
+                  opacity: selectedItemId ? 1 : 0.5,
+                }}
+                title="전체(미분류)로 이동"
+              >
+                🧺 전체로 이동
+              </button>
+            </div>
+
+            {/* 서브폴더 목록 */}
             {currentSubFolders.length > 0 && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
                 {currentSubFolders.map((f) => (
@@ -780,16 +950,9 @@ export default function Page() {
                     onClick={() => {
                       setSelectedFolderId(f.id);
                       setHistoryPage(1);
+                      setSelectedItemId(null);
                     }}
-                    style={{
-                      height: 34,
-                      padding: "0 12px",
-                      borderRadius: 999,
-                      border: "1px solid #ddd",
-                      background: "#fff",
-                      cursor: "pointer",
-                      fontWeight: 900,
-                    }}
+                    style={{ height: 34, padding: "0 12px", borderRadius: 999, border: "1px solid #ddd", background: "#fff", cursor: "pointer", fontWeight: 900 }}
                     title="폴더 열기"
                   >
                     📁 {f.name}
@@ -805,14 +968,14 @@ export default function Page() {
               <>
                 <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
                   {pagedHistory.map((it) => {
-                    // ✅ 히스토리 항목은 간단히: 이름 + 회차 (요청 반영)
                     const label = `${it.seriesTitle} · ${it.episodeNo}화`;
+                    const isSel = selectedItemId === it.id;
 
                     return (
                       <div
                         key={it.id}
                         style={{
-                          border: "1px solid #eee",
+                          border: isSel ? "2px solid #111" : "1px solid #eee",
                           borderRadius: 12,
                           padding: 12,
                           background: "#fff",
@@ -821,6 +984,23 @@ export default function Page() {
                           alignItems: "center",
                         }}
                       >
+                        {/* ✅ 이동할 항목 선택 */}
+                        <button
+                          onClick={() => setSelectedItemId((prev) => (prev === it.id ? null : it.id))}
+                          style={{
+                            width: 44,
+                            height: 34,
+                            borderRadius: 10,
+                            border: "1px solid #ddd",
+                            cursor: "pointer",
+                            fontWeight: 900,
+                            background: "#fff",
+                          }}
+                          title="이동할 항목 선택"
+                        >
+                          {isSel ? "✔" : "○"}
+                        </button>
+
                         <button
                           onClick={() => loadHistoryItem(it)}
                           style={{ flex: 1, border: "none", background: "transparent", cursor: "pointer", textAlign: "left" }}
@@ -896,7 +1076,7 @@ export default function Page() {
               </>
             )}
 
-            {/* ✅ 오른쪽 하단 ➕ = "현재 폴더 안에" 새 폴더 */}
+            {/* 오른쪽 하단 ➕ (현재 폴더 안에 새 폴더) */}
             <button
               onClick={createFolder}
               style={{
@@ -924,7 +1104,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* Bottom Nav */}
+      {/* Bottom Nav: 이전/복사/다음 */}
       <div
         style={{
           position: "fixed",
