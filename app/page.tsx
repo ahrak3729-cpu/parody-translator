@@ -51,7 +51,7 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string; // "본문만" 저장
+  translatedText: string; // 본문만 저장
   url?: string;
 
   folderId?: string | null;
@@ -135,6 +135,32 @@ async function safeReadJson(res: Response) {
   }
 }
 
+/* =========================
+   작은 메뉴 버튼
+========================= */
+function MenuButton(props: { label: string; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      onClick={props.onClick}
+      disabled={props.disabled}
+      style={{
+        width: "100%",
+        textAlign: "left",
+        padding: "10px 10px",
+        borderRadius: 12,
+        border: "1px solid #eee",
+        background: "#fff",
+        cursor: props.disabled ? "not-allowed" : "pointer",
+        fontWeight: 900,
+        opacity: props.disabled ? 0.5 : 1,
+        marginTop: 6,
+      }}
+    >
+      {props.label}
+    </button>
+  );
+}
+
 export default function Page() {
   /* =========================
      URL 중심
@@ -186,10 +212,11 @@ export default function Page() {
   // 전체(null) 또는 현재 폴더
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
 
-  // ✅ 액션 메뉴(➕) 팝업
-  const [actionsOpen, setActionsOpen] = useState(false);
+  // ✅ + 메뉴 팝업: 모달 밖 fixed 레이어로 띄우기 위해 좌표 저장
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ right: number; bottom: number } | null>(null);
 
-  // ✅ 선택 모드(평소엔 체크박스 숨김)
+  // ✅ 파일 선택 모드: 토글 버튼으로만 켜기
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
 
@@ -261,9 +288,7 @@ export default function Page() {
     return filteredHistory.slice(start, start + PAGE_SIZE);
   }, [filteredHistory, historyPage]);
 
-  const selectedCount = useMemo(() => {
-    return Object.values(selectedIds).filter(Boolean).length;
-  }, [selectedIds]);
+  const selectedCount = useMemo(() => Object.values(selectedIds).filter(Boolean).length, [selectedIds]);
 
   function persistHistory(next: HistoryItem[]) {
     setHistory(next);
@@ -315,9 +340,33 @@ export default function Page() {
   }
 
   /* =========================
+     선택 모드
+  ========================= */
+  function enableSelectMode() {
+    setSelectMode(true);
+    setSelectedIds({});
+  }
+
+  function disableSelectMode() {
+    setSelectMode(false);
+    setSelectedIds({});
+    setMovePickerOpen(false);
+  }
+
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function getSelectedItemIds(): string[] {
+    return Object.entries(selectedIds)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
+  }
+
+  /* =========================
      폴더 액션
   ========================= */
-  function createFolder() {
+  function createFolderNested() {
     const name = prompt("새 폴더 이름을 입력해줘");
     if (!name) return;
     const trimmed = name.trim();
@@ -327,15 +376,14 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       name: trimmed,
-      parentId: selectedFolderId,
+      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성 (폴더 안 폴더 OK)
     };
 
     const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
     persistFolders(next);
 
-    setSelectedFolderId(f.id);
+    // 생성 후: 현재 폴더 유지(원하면 f.id로 자동 진입으로 바꿀 수 있어)
     setHistoryPage(1);
-    exitSelectMode();
   }
 
   function renameCurrentFolder() {
@@ -376,52 +424,25 @@ export default function Page() {
 
     setSelectedFolderId(f.parentId);
     setHistoryPage(1);
-    exitSelectMode();
+    disableSelectMode();
   }
 
   function goUpFolder() {
     if (selectedFolderId === null) return;
     setSelectedFolderId(parentFolderId);
     setHistoryPage(1);
-    exitSelectMode();
-  }
-
-  /* =========================
-     선택 모드
-  ========================= */
-  function enterSelectMode() {
-    setSelectMode(true);
-    setSelectedIds({});
-  }
-
-  function exitSelectMode() {
-    setSelectMode(false);
-    setSelectedIds({});
-    setActionsOpen(false);
-  }
-
-  function toggleSelect(id: string) {
-    setSelectedIds((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  function getSelectedItemIds(): string[] {
-    return Object.entries(selectedIds)
-      .filter(([, v]) => v)
-      .map(([k]) => k);
+    disableSelectMode();
   }
 
   /* =========================
      파일 이동 / 삭제
   ========================= */
   function openMovePicker() {
-    if (!selectMode) enterSelectMode();
     const ids = getSelectedItemIds();
     if (ids.length === 0) {
-      alert("이동할 번역본을 먼저 체크해줘.");
+      alert("옮길 번역본을 먼저 체크해줘.");
       return;
     }
-
-    // 기본값: 현재 폴더(보이는 폴더)
     setMoveTargetFolderId(selectedFolderId);
     setMovePickerOpen(true);
   }
@@ -430,18 +451,15 @@ export default function Page() {
     const ids = getSelectedItemIds();
     if (ids.length === 0) return;
 
-    const next = history.map((h) =>
-      ids.includes(h.id) ? { ...h, folderId: targetFolderId } : h
-    );
+    const next = history.map((h) => (ids.includes(h.id) ? { ...h, folderId: targetFolderId } : h));
     persistHistory(next);
 
     setMovePickerOpen(false);
     alert(`이동 완료: "${folderNameById(targetFolderId)}"`);
-    exitSelectMode();
+    disableSelectMode();
   }
 
   function deleteSelectedItems() {
-    if (!selectMode) enterSelectMode();
     const ids = getSelectedItemIds();
     if (ids.length === 0) {
       alert("삭제할 번역본을 먼저 체크해줘.");
@@ -454,13 +472,11 @@ export default function Page() {
     const next = history.filter((h) => !ids.includes(h.id));
     persistHistory(next);
 
-    // 페이지 보정
     const nextFiltered =
       selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
-    // 현재 뷰어가 삭제된 항목이면 적당히 정리
     if (currentHistoryId && ids.includes(currentHistoryId)) {
       setCurrentHistoryId(next[0]?.id ?? null);
       if (!next[0]) {
@@ -469,7 +485,7 @@ export default function Page() {
       }
     }
 
-    exitSelectMode();
+    disableSelectMode();
   }
 
   function loadHistoryItem(it: HistoryItem) {
@@ -659,6 +675,18 @@ export default function Page() {
   }
 
   /* =========================
+     + 메뉴 앵커 계산 (모달 잘림 방지)
+  ========================= */
+  function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
+    const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+    // 화면 오른쪽/아래 기준으로 fixed 위치 계산
+    const right = Math.max(12, window.innerWidth - rect.right);
+    const bottom = Math.max(12, window.innerHeight - rect.top); // 버튼 위로 메뉴가 뜨도록
+    setMenuAnchor({ right, bottom });
+    setMenuOpen(true);
+  }
+
+  /* =========================
      UI
   ========================= */
   return (
@@ -670,12 +698,13 @@ export default function Page() {
           <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임</div>
         </div>
 
-        {/* ✅ 히스토리 버튼: 삼(☰) 아이콘만 */}
+        {/* 히스토리: ☰ 아이콘만 */}
         <button
           onClick={() => {
             setHistoryOpen(true);
             setHistoryPage(1);
-            exitSelectMode();
+            setMenuOpen(false);
+            setMenuAnchor(null);
           }}
           style={{
             width: 44,
@@ -839,7 +868,9 @@ export default function Page() {
           }}
           onClick={() => {
             setHistoryOpen(false);
-            setActionsOpen(false);
+            setMenuOpen(false);
+            setMenuAnchor(null);
+            disableSelectMode();
           }}
         >
           <div
@@ -866,7 +897,6 @@ export default function Page() {
                     현재 폴더: <b>{breadcrumbText}</b>
                   </span>
 
-                  {/* 폴더 안에서는 ✏️ */}
                   {selectedFolderId !== null && (
                     <button
                       onClick={renameCurrentFolder}
@@ -885,18 +915,16 @@ export default function Page() {
                     </button>
                   )}
 
-                  {selectMode && (
-                    <span style={{ fontWeight: 900, opacity: 0.9 }}>
-                      · 선택 모드 ({selectedCount}개)
-                    </span>
-                  )}
+                  {selectMode && <span style={{ fontWeight: 900 }}>· 선택 {selectedCount}개</span>}
                 </div>
               </div>
 
               <button
                 onClick={() => {
                   setHistoryOpen(false);
-                  setActionsOpen(false);
+                  setMenuOpen(false);
+                  setMenuAnchor(null);
+                  disableSelectMode();
                 }}
                 style={{ height: 36, padding: "0 12px", borderRadius: 10, border: "1px solid #ddd", cursor: "pointer", fontWeight: 900, background: "#fff" }}
               >
@@ -910,7 +938,7 @@ export default function Page() {
                 onClick={() => {
                   setSelectedFolderId(null);
                   setHistoryPage(1);
-                  exitSelectMode();
+                  disableSelectMode();
                 }}
                 style={{
                   height: 34,
@@ -922,12 +950,10 @@ export default function Page() {
                   cursor: "pointer",
                   fontWeight: 900,
                 }}
-                title="전체"
               >
                 전체
               </button>
 
-              {/* ✅ 뒤로가기: 아이콘만 */}
               <button
                 onClick={goUpFolder}
                 disabled={selectedFolderId === null}
@@ -942,13 +968,12 @@ export default function Page() {
                   opacity: selectedFolderId === null ? 0.5 : 1,
                 }}
                 title="상위 폴더"
-                aria-label="상위 폴더"
               >
                 ⬅
               </button>
             </div>
 
-            {/* 서브폴더 목록 */}
+            {/* 서브폴더 */}
             {currentSubFolders.length > 0 && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
                 {currentSubFolders
@@ -960,7 +985,7 @@ export default function Page() {
                       onClick={() => {
                         setSelectedFolderId(f.id);
                         setHistoryPage(1);
-                        exitSelectMode();
+                        disableSelectMode();
                       }}
                       style={{
                         height: 34,
@@ -971,7 +996,6 @@ export default function Page() {
                         cursor: "pointer",
                         fontWeight: 900,
                       }}
-                      title="폴더 열기"
                     >
                       📁 {f.name}
                     </button>
@@ -979,7 +1003,7 @@ export default function Page() {
               </div>
             )}
 
-            {/* 히스토리 리스트 */}
+            {/* 리스트 */}
             {filteredHistory.length === 0 ? (
               <div style={{ opacity: 0.65, padding: 10 }}>(이 폴더에 저장된 항목이 없어요)</div>
             ) : (
@@ -1002,7 +1026,6 @@ export default function Page() {
                           alignItems: "center",
                         }}
                       >
-                        {/* ✅ 선택 모드일 때만 체크박스 표시 */}
                         {selectMode && (
                           <input
                             type="checkbox"
@@ -1089,7 +1112,6 @@ export default function Page() {
                             background: active ? "#111" : "#fff",
                             color: active ? "#fff" : "#111",
                           }}
-                          title={`${p}페이지`}
                         >
                           {p}
                         </button>
@@ -1100,12 +1122,56 @@ export default function Page() {
               </>
             )}
 
-            {/* =========================
-               ✅ 오른쪽 하단 ➕ 액션 메뉴
-               ========================= */}
-            <div style={{ position: "absolute", right: 14, bottom: 14 }}>
+            {/* ✅ 하단 오른쪽: 선택모드일 때만 이동/삭제 버튼이 + 왼쪽에 등장 */}
+            <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
+              {selectMode && (
+                <>
+                  <button
+                    onClick={openMovePicker}
+                    disabled={selectedCount === 0}
+                    style={{
+                      height: 40,
+                      padding: "0 12px",
+                      borderRadius: 14,
+                      border: "1px solid #ddd",
+                      background: "#fff",
+                      fontWeight: 900,
+                      cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                      opacity: selectedCount > 0 ? 1 : 0.5,
+                      fontSize: 13,
+                    }}
+                    title="이동"
+                  >
+                    이동
+                  </button>
+
+                  {/* 버튼 간격을 넓게 */}
+                  <div style={{ width: 8 }} />
+
+                  <button
+                    onClick={deleteSelectedItems}
+                    disabled={selectedCount === 0}
+                    style={{
+                      height: 40,
+                      padding: "0 12px",
+                      borderRadius: 14,
+                      border: "1px solid #ddd",
+                      background: "#fff",
+                      fontWeight: 900,
+                      cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                      opacity: selectedCount > 0 ? 1 : 0.5,
+                      fontSize: 13,
+                    }}
+                    title="삭제"
+                  >
+                    삭제
+                  </button>
+                </>
+              )}
+
+              {/* + 버튼 */}
               <button
-                onClick={() => setActionsOpen((v) => !v)}
+                onClick={(e) => openMenuFromButton(e)}
                 style={{
                   width: 52,
                   height: 52,
@@ -1125,210 +1191,208 @@ export default function Page() {
               >
                 ➕
               </button>
-
-              {actionsOpen && (
-                <div
-                  style={{
-                    position: "absolute",
-                    right: 0,
-                    bottom: 60,
-                    width: 220,
-                    background: "#fff",
-                    border: "1px solid #ddd",
-                    borderRadius: 14,
-                    boxShadow: "0 18px 40px rgba(0,0,0,0.14)",
-                    padding: 8,
-                  }}
-                >
-                  <MenuButton
-                    label="📁 새 폴더 만들기"
-                    onClick={() => {
-                      setActionsOpen(false);
-                      createFolder();
-                    }}
-                  />
-                  <MenuButton
-                    label="🗑 폴더 삭제"
-                    disabled={selectedFolderId === null}
-                    onClick={() => {
-                      setActionsOpen(false);
-                      deleteCurrentFolder();
-                    }}
-                  />
-                  <div style={{ height: 1, background: "#eee", margin: "8px 6px" }} />
-
-                  <MenuButton
-                    label="📦 파일 이동…"
-                    onClick={() => {
-                      setActionsOpen(false);
-                      if (!selectMode) enterSelectMode();
-                      // 바로 이동 모달을 열진 않고, 선택 후 다시 누르거나 아래 버튼으로 열도록
-                      openMovePicker();
-                    }}
-                  />
-                  <MenuButton
-                    label="🗑 파일 삭제"
-                    onClick={() => {
-                      setActionsOpen(false);
-                      if (!selectMode) enterSelectMode();
-                      deleteSelectedItems();
-                    }}
-                  />
-
-                  {selectMode && (
-                    <>
-                      <div style={{ height: 1, background: "#eee", margin: "8px 6px" }} />
-                      <MenuButton
-                        label="✖ 선택 모드 종료"
-                        onClick={() => {
-                          exitSelectMode();
-                        }}
-                      />
-                    </>
-                  )}
-                </div>
-              )}
             </div>
+          </div>
+        </div>
+      )}
 
-            {/* =========================
-                Move Picker Modal
-               ========================= */}
-            {movePickerOpen && (
-              <div
-                role="dialog"
-                aria-modal="true"
-                style={{
-                  position: "fixed",
-                  inset: 0,
-                  background: "rgba(0,0,0,0.35)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  padding: 16,
-                  zIndex: 10000,
-                }}
-                onClick={() => setMovePickerOpen(false)}
-              >
-                <div
-                  style={{
-                    width: "min(720px, 100%)",
-                    maxHeight: "80vh",
-                    overflow: "auto",
-                    background: "#fff",
-                    borderRadius: 14,
-                    border: "1px solid #ddd",
-                    padding: 14,
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
-                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                        선택된 항목: <b>{selectedCount}개</b> · 대상 폴더: <b>{folderNameById(moveTargetFolderId)}</b>
-                      </div>
-                    </div>
+      {/* =========================
+          ✅ + 메뉴 팝업 (fixed 레이어)
+          - 모달 overflow에 잘리지 않음
+         ========================= */}
+      {historyOpen && menuOpen && menuAnchor && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10001,
+          }}
+          onClick={() => {
+            setMenuOpen(false);
+            setMenuAnchor(null);
+          }}
+        >
+          <div
+            style={{
+              position: "fixed",
+              right: menuAnchor.right,
+              bottom: menuAnchor.bottom,
+              width: 220,
+              background: "#fff",
+              border: "1px solid #ddd",
+              borderRadius: 14,
+              boxShadow: "0 18px 40px rgba(0,0,0,0.14)",
+              padding: 8,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <MenuButton
+              label="📁 새 폴더 만들기"
+              onClick={() => {
+                setMenuOpen(false);
+                setMenuAnchor(null);
+                createFolderNested();
+              }}
+            />
 
-                    <button
-                      onClick={() => setMovePickerOpen(false)}
-                      style={{
-                        height: 36,
-                        padding: "0 12px",
-                        borderRadius: 10,
-                        border: "1px solid #ddd",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        background: "#fff",
-                      }}
-                    >
-                      닫기
-                    </button>
-                  </div>
+            <MenuButton
+              label="🗑 폴더 삭제"
+              disabled={selectedFolderId === null}
+              onClick={() => {
+                setMenuOpen(false);
+                setMenuAnchor(null);
+                deleteCurrentFolder();
+              }}
+            />
 
-                  <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
-                    {/* 전체 */}
-                    <button
-                      onClick={() => setMoveTargetFolderId(null)}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "10px 10px",
-                        borderRadius: 10,
-                        border: moveTargetFolderId === null ? "2px solid #111" : "1px solid #ddd",
-                        background: "#fff",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                      }}
-                      title="전체(최상위)로 이동"
-                    >
-                      🧺 전체
-                    </button>
+            <div style={{ height: 1, background: "#eee", margin: "8px 6px" }} />
 
-                    <div style={{ height: 10 }} />
+            <MenuButton
+              label={selectMode ? "✅ 파일선택 종료" : "☑️ 파일선택"}
+              onClick={() => {
+                setMenuOpen(false);
+                setMenuAnchor(null);
+                if (!selectMode) enableSelectMode();
+                else disableSelectMode();
+              }}
+            />
+          </div>
+        </div>
+      )}
 
-                    {buildFolderTree(null, 0).map(({ f, depth }) => {
-                      const active = moveTargetFolderId === f.id;
-                      return (
-                        <button
-                          key={f.id}
-                          onClick={() => setMoveTargetFolderId(f.id)}
-                          style={{
-                            width: "100%",
-                            textAlign: "left",
-                            padding: "10px 10px",
-                            borderRadius: 10,
-                            border: active ? "2px solid #111" : "1px solid #ddd",
-                            background: "#fff",
-                            cursor: "pointer",
-                            fontWeight: 900,
-                            marginTop: 8,
-                          }}
-                          title="이 폴더로 이동"
-                        >
-                          <span style={{ display: "inline-block", width: depth * 14 }} />
-                          📁 {f.name}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
-                    <button
-                      onClick={() => setMovePickerOpen(false)}
-                      style={{
-                        height: 38,
-                        padding: "0 14px",
-                        borderRadius: 10,
-                        border: "1px solid #ddd",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        background: "#fff",
-                      }}
-                    >
-                      취소
-                    </button>
-
-                    <button
-                      onClick={() => moveSelectedToFolder(moveTargetFolderId)}
-                      disabled={selectedCount === 0}
-                      style={{
-                        height: 38,
-                        padding: "0 14px",
-                        borderRadius: 10,
-                        border: "1px solid #ddd",
-                        cursor: selectedCount > 0 ? "pointer" : "not-allowed",
-                        fontWeight: 900,
-                        background: "#111",
-                        color: "#fff",
-                        opacity: selectedCount > 0 ? 1 : 0.5,
-                      }}
-                    >
-                      이동 확정
-                    </button>
-                  </div>
+      {/* =========================
+          Move Picker Modal
+         ========================= */}
+      {movePickerOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 10000,
+          }}
+          onClick={() => setMovePickerOpen(false)}
+        >
+          <div
+            style={{
+              width: "min(720px, 100%)",
+              maxHeight: "80vh",
+              overflow: "auto",
+              background: "#fff",
+              borderRadius: 14,
+              border: "1px solid #ddd",
+              padding: 14,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                  선택된 항목: <b>{selectedCount}개</b> · 대상 폴더: <b>{folderNameById(moveTargetFolderId)}</b>
                 </div>
               </div>
-            )}
+
+              <button
+                onClick={() => setMovePickerOpen(false)}
+                style={{
+                  height: 36,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: "#fff",
+                }}
+              >
+                닫기
+              </button>
+            </div>
+
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10 }}>
+              <button
+                onClick={() => setMoveTargetFolderId(null)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "10px 10px",
+                  borderRadius: 10,
+                  border: moveTargetFolderId === null ? "2px solid #111" : "1px solid #ddd",
+                  background: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                }}
+              >
+                🧺 전체
+              </button>
+
+              <div style={{ height: 10 }} />
+
+              {buildFolderTree(null, 0).map(({ f, depth }) => {
+                const active = moveTargetFolderId === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    onClick={() => setMoveTargetFolderId(f.id)}
+                    style={{
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "10px 10px",
+                      borderRadius: 10,
+                      border: active ? "2px solid #111" : "1px solid #ddd",
+                      background: "#fff",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                      marginTop: 8,
+                    }}
+                  >
+                    <span style={{ display: "inline-block", width: depth * 14 }} />
+                    📁 {f.name}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 12 }}>
+              <button
+                onClick={() => setMovePickerOpen(false)}
+                style={{
+                  height: 38,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: "#fff",
+                }}
+              >
+                취소
+              </button>
+
+              <button
+                onClick={() => moveSelectedToFolder(moveTargetFolderId)}
+                disabled={selectedCount === 0}
+                style={{
+                  height: 38,
+                  padding: "0 14px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  cursor: selectedCount > 0 ? "pointer" : "not-allowed",
+                  fontWeight: 900,
+                  background: "#111",
+                  color: "#fff",
+                  opacity: selectedCount > 0 ? 1 : 0.5,
+                }}
+              >
+                이동 확정
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1400,31 +1464,5 @@ export default function Page() {
         </div>
       </div>
     </main>
-  );
-}
-
-/* =========================
-   작은 메뉴 버튼 컴포넌트
-========================= */
-function MenuButton(props: { label: string; onClick: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={props.onClick}
-      disabled={props.disabled}
-      style={{
-        width: "100%",
-        textAlign: "left",
-        padding: "10px 10px",
-        borderRadius: 12,
-        border: "1px solid #eee",
-        background: "#fff",
-        cursor: props.disabled ? "not-allowed" : "pointer",
-        fontWeight: 900,
-        opacity: props.disabled ? 0.5 : 1,
-        marginTop: 6,
-      }}
-    >
-      {props.label}
-    </button>
   );
 }
