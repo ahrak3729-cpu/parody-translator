@@ -51,8 +51,9 @@ type HistoryItem = {
   episodeNo: number;
   subtitle: string;
   sourceText: string;
-  translatedText: string;
+  translatedText: string; // "복사용 최종 텍스트" (URL모드면 헤더 포함, 수동모드면 본문만)
   url?: string;
+  mode?: "url" | "manual"; // ✅ 추가: 어떤 방식으로 번역했는지
 };
 
 const STORAGE_KEY = "parody_translator_history_v3";
@@ -134,7 +135,8 @@ export default function Page() {
      원문 / 결과
   ========================= */
   const [source, setSource] = useState("");
-  const [result, setResult] = useState("");
+  const [resultBody, setResultBody] = useState(""); // ✅ 변경: 번역 "본문"만 저장
+  const [resultMode, setResultMode] = useState<"url" | "manual" | null>(null); // ✅ 추가
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
@@ -161,9 +163,7 @@ export default function Page() {
   const canNext = currentIndex > 0; // 다음(더 최신)은 index-1
 
   const percent =
-    progress && progress.total
-      ? Math.floor((progress.current / progress.total) * 100)
-      : 0;
+    progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
@@ -186,17 +186,19 @@ export default function Page() {
     const data = await safeReadJson(res);
 
     if (!res.ok) {
-      const msg =
-        (data && (data.error || data.message)) ||
-        "번역 실패";
+      const msg = (data && ((data as any).error || (data as any).message)) || "번역 실패";
       throw new Error(String(msg));
     }
 
     return String((data as any)?.translated ?? "");
   }
 
-  function buildViewerText(body: string) {
-    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${body.trim()}`;
+  // ✅ URL 모드일 때만 "복사/저장용" 최종 텍스트(헤더 포함)
+  function buildCopyText(mode: "url" | "manual", body: string) {
+    const b = body.trim();
+    if (!b) return "";
+    if (mode === "manual") return b;
+    return `${headerPreview.title}\n${headerPreview.epLine}\n\n\n${b}`;
   }
 
   function autoSaveToHistory(params: {
@@ -206,16 +208,25 @@ export default function Page() {
     seriesTitle: string;
     episodeNo: number;
     subtitle: string;
+    mode: "url" | "manual";
   }) {
     const item: HistoryItem = {
       id: uid(),
       createdAt: Date.now(),
-      seriesTitle: params.seriesTitle.trim() || "패러디소설",
-      episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
-      subtitle: params.subtitle.trim(),
+      // ✅ 수동번역은 히스토리 라벨이 헷갈리지 않게 고정
+      seriesTitle:
+        params.mode === "manual"
+          ? "텍스트번역"
+          : params.seriesTitle.trim() || "패러디소설",
+      episodeNo:
+        params.mode === "manual"
+          ? 1
+          : Math.max(1, Math.floor(params.episodeNo || 1)),
+      subtitle: params.mode === "manual" ? "" : params.subtitle.trim(),
       sourceText: params.sourceText,
       translatedText: params.translatedText,
       url: params.url?.trim() || undefined,
+      mode: params.mode,
     };
 
     const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
@@ -232,7 +243,20 @@ export default function Page() {
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
     setSource(it.sourceText);
-    setResult(it.translatedText);
+
+    // ✅ 히스토리는 translatedText가 "복사용 최종 텍스트"이므로
+    // 화면 표시는 모드에 따라 분리해서 보여주기
+    const mode: "url" | "manual" = it.mode === "manual" ? "manual" : "url";
+    setResultMode(mode);
+
+    if (mode === "manual") {
+      setResultBody(it.translatedText); // 본문만
+    } else {
+      // 헤더(2줄 + 공백) 제거 후 본문만 저장
+      const body = it.translatedText.replace(/^.*\n.*\n\n\n/, "");
+      setResultBody(body);
+    }
+
     setError("");
     setProgress(null);
     setCurrentHistoryId(it.id);
@@ -251,7 +275,8 @@ export default function Page() {
       if (next[0]) loadHistoryItem(next[0]);
       else {
         setSource("");
-        setResult("");
+        setResultBody("");
+        setResultMode(null);
       }
     }
 
@@ -288,12 +313,17 @@ export default function Page() {
   /* =========================
      번역 실행
   ========================= */
-  async function runTranslation(text: string, sourceUrl?: string) {
+  async function runTranslation(
+    text: string,
+    mode: "url" | "manual",
+    sourceUrl?: string
+  ) {
     if (!text.trim()) return;
 
     setIsLoading(true);
     setError("");
-    setResult("");
+    setResultBody("");
+    setResultMode(mode);
     setProgress(null);
 
     abortRef.current?.abort();
@@ -315,17 +345,20 @@ export default function Page() {
         out += (out ? "\n\n" : "") + t.trim();
       }
 
-      const finalText = buildViewerText(out);
-      setResult(finalText);
+      const bodyOnly = out.trim();
+      setResultBody(bodyOnly);
       setProgress({ current: chunks.length, total: chunks.length });
+
+      const copyText = buildCopyText(mode, bodyOnly);
 
       autoSaveToHistory({
         sourceText: text.trim(),
-        translatedText: finalText,
+        translatedText: copyText,
         url: sourceUrl,
         seriesTitle: headerPreview.title,
         episodeNo,
         subtitle,
+        mode,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -356,10 +389,7 @@ export default function Page() {
       const data: any = await safeReadJson(res);
 
       if (!res.ok) {
-        const msg =
-          data?.error ||
-          data?.message ||
-          "본문 불러오기 실패";
+        const msg = data?.error || data?.message || "본문 불러오기 실패";
         throw new Error(String(msg));
       }
 
@@ -380,8 +410,8 @@ export default function Page() {
 
       setSource(text);
 
-      // URL 불러오면 바로 번역까지
-      await runTranslation(text, u);
+      // ✅ URL 불러오면 URL 모드로 번역
+      await runTranslation(text, "url", u);
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
     } finally {
@@ -389,13 +419,27 @@ export default function Page() {
     }
   }
 
+  const copyTargetText = useMemo(() => {
+    if (!resultBody.trim()) return "";
+    const mode = resultMode ?? "manual";
+    return buildCopyText(mode, resultBody);
+  }, [resultBody, resultMode, headerPreview.title, headerPreview.epLine]);
+
   /* =========================
      UI
   ========================= */
   return (
     <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86 }}>
       {/* 상단바 + 히스토리 버튼 */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 14,
+        }}
+      >
         <div>
           <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0 }}>Parody Translator</h1>
           <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
@@ -446,7 +490,7 @@ export default function Page() {
         </button>
       </div>
 
-      {/* 텍스트 직접 번역 (문구 정리: 괄호 제거) */}
+      {/* 텍스트 직접 번역 */}
       <details
         open={manualOpen}
         onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
@@ -473,7 +517,7 @@ export default function Page() {
 
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
             <button
-              onClick={() => runTranslation(source)}
+              onClick={() => runTranslation(source, "manual")}
               disabled={isLoading || !source.trim()}
               style={{
                 height: 40,
@@ -515,11 +559,23 @@ export default function Page() {
         </div>
       </details>
 
-      {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
+      {error && (
+        <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>
+          {error}
+        </div>
+      )}
 
       {/* 결과: Viewer 스타일 */}
       <div style={{ marginTop: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            marginBottom: 8,
+          }}
+        >
           <div style={{ fontWeight: 900, opacity: 0.85 }}>번역 결과</div>
         </div>
 
@@ -534,9 +590,9 @@ export default function Page() {
             lineHeight: 1.7,
           }}
         >
-          {!result.trim() ? (
+          {!resultBody.trim() ? (
             <div style={{ opacity: 0.55 }}>번역 결과가 여기에 표시됩니다.</div>
-          ) : (
+          ) : resultMode === "url" ? (
             <>
               <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
                 {headerPreview.title}
@@ -544,10 +600,11 @@ export default function Page() {
               <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>
                 {headerPreview.epLine}
               </div>
-              <div style={{ fontSize: 16 }}>
-                {result.replace(/^.*\n.*\n\n\n/, "")}
-              </div>
+              <div style={{ fontSize: 16 }}>{resultBody}</div>
             </>
+          ) : (
+            // ✅ 수동 번역은 헤더 없이 본문만
+            <div style={{ fontSize: 16 }}>{resultBody}</div>
           )}
         </div>
       </div>
@@ -583,7 +640,15 @@ export default function Page() {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+                marginBottom: 10,
+              }}
+            >
               <div>
                 <div style={{ fontSize: 18, fontWeight: 900 }}>히스토리</div>
                 <div style={{ fontSize: 12, opacity: 0.65, marginTop: 2 }}>
@@ -612,7 +677,10 @@ export default function Page() {
             ) : (
               <div style={{ display: "grid", gap: 10 }}>
                 {history.map((it) => {
-                  const label = it.subtitle
+                  const isManual = it.mode === "manual";
+                  const label = isManual
+                    ? `텍스트번역`
+                    : it.subtitle
                     ? `${it.seriesTitle} · ${it.episodeNo}화 · ${it.subtitle}`
                     : `${it.seriesTitle} · ${it.episodeNo}화`;
 
@@ -730,8 +798,8 @@ export default function Page() {
           </button>
 
           <button
-            onClick={() => handleCopy(result || "")}
-            disabled={!result.trim()}
+            onClick={() => handleCopy(copyTargetText)}
+            disabled={!copyTargetText.trim()}
             style={{
               height: 40,
               padding: "0 14px",
@@ -739,8 +807,8 @@ export default function Page() {
               border: "1px solid #ddd",
               background: "#fff",
               fontWeight: 900,
-              cursor: result.trim() ? "pointer" : "not-allowed",
-              opacity: result.trim() ? 1 : 0.5,
+              cursor: copyTargetText.trim() ? "pointer" : "not-allowed",
+              opacity: copyTargetText.trim() ? 1 : 0.5,
             }}
           >
             📋 복사
