@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 
 /* =========================
    자동 분할 (긴 글 대응)
@@ -161,12 +161,28 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
   );
 }
 
+function isPixivUrl(u: string) {
+  try {
+    const x = new URL(u);
+    const h = x.hostname.toLowerCase();
+    return h === "www.pixiv.net" || h.endsWith(".pixiv.net") || h === "pixiv.net";
+  } catch {
+    return false;
+  }
+}
+
 export default function Page() {
   /* =========================
      URL 중심
   ========================= */
   const [url, setUrl] = useState("");
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+
+  /* =========================
+     설정(⚙️) - 쿠키는 "세션에서만"
+  ========================= */
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pixivCookie, setPixivCookie] = useState(""); // ✅ 로컬저장 안 함(세션 상태만)
 
   /* =========================
      텍스트 직접 번역: 접기/펴기
@@ -230,14 +246,11 @@ export default function Page() {
 
   const headerPreview = useMemo(() => {
     const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
-    const epLine = subtitle.trim()
-      ? `제 ${episodeNo}화 · ${subtitle.trim()}`
-      : `제 ${episodeNo}화`;
+    const epLine = subtitle.trim() ? `제 ${episodeNo}화 · ${subtitle.trim()}` : `제 ${episodeNo}화`;
     return { title, epLine };
   }, [seriesTitle, episodeNo, subtitle]);
 
-  const percent =
-    progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
+  const percent = progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
 
   const currentIndex = useMemo(() => {
     if (!currentHistoryId) return -1;
@@ -279,9 +292,7 @@ export default function Page() {
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
   }, [history, selectedFolderId]);
 
-  const totalPages = useMemo(() => {
-    return Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE));
-  }, [filteredHistory.length]);
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)), [filteredHistory.length]);
 
   const pagedHistory = useMemo(() => {
     const start = (historyPage - 1) * PAGE_SIZE;
@@ -376,13 +387,11 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       name: trimmed,
-      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성 (폴더 안 폴더 OK)
+      parentId: selectedFolderId, // ✅ 현재 폴더 안에 생성
     };
 
     const next = [...folders, f].sort((a, b) => a.createdAt - b.createdAt);
     persistFolders(next);
-
-    // 생성 후: 현재 폴더 유지(원하면 f.id로 자동 진입으로 바꿀 수 있어)
     setHistoryPage(1);
   }
 
@@ -472,8 +481,7 @@ export default function Page() {
     const next = history.filter((h) => !ids.includes(h.id));
     persistHistory(next);
 
-    const nextFiltered =
-      selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
+    const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
@@ -629,6 +637,7 @@ export default function Page() {
 
   /* =========================
      URL → 본문 불러오기
+     - Pixiv면 pixivCookie(세션값) 같이 보냄
   ========================= */
   async function fetchFromUrl() {
     const u = url.trim();
@@ -638,10 +647,16 @@ export default function Page() {
     setError("");
 
     try {
+      const pixiv = isPixivUrl(u);
+      const body: any = { url: u };
+
+      // ✅ pixiv만 쿠키 옵션 전달
+      if (pixiv && pixivCookie.trim()) body.pixivCookie = pixivCookie.trim();
+
       const res = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: u }),
+        body: JSON.stringify(body),
       });
 
       const data: any = await safeReadJson(res);
@@ -653,7 +668,7 @@ export default function Page() {
 
       if (data?.__notJson) {
         throw new Error(
-          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(다른 사이트로 테스트하거나, 텍스트 직접 붙여넣기로 확인해줘)"
+          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(설정(⚙️)에서 Pixiv 쿠키를 넣거나, 텍스트 직접 붙여넣기로 확인해줘)"
         );
       }
 
@@ -661,7 +676,7 @@ export default function Page() {
       const text = String(data?.text ?? "");
       if (!text.trim()) {
         throw new Error(
-          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
+          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n설정(⚙️)에서 Pixiv 쿠키를 넣거나, 텍스트 직접 붙여넣기로 먼저 확인해줘."
         );
       }
 
@@ -679,9 +694,8 @@ export default function Page() {
   ========================= */
   function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-    // 화면 오른쪽/아래 기준으로 fixed 위치 계산
     const right = Math.max(12, window.innerWidth - rect.right);
-    const bottom = Math.max(12, window.innerHeight - rect.top); // 버튼 위로 메뉴가 뜨도록
+    const bottom = Math.max(12, window.innerHeight - rect.top);
     setMenuAnchor({ right, bottom });
     setMenuOpen(true);
   }
@@ -698,29 +712,50 @@ export default function Page() {
           <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임</div>
         </div>
 
-        {/* 히스토리: ☰ 아이콘만 */}
-        <button
-          onClick={() => {
-            setHistoryOpen(true);
-            setHistoryPage(1);
-            setMenuOpen(false);
-            setMenuAnchor(null);
-          }}
-          style={{
-            width: 44,
-            height: 40,
-            borderRadius: 12,
-            border: "1px solid #ddd",
-            cursor: "pointer",
-            fontWeight: 900,
-            background: "#fff",
-            fontSize: 18,
-          }}
-          title="히스토리"
-          aria-label="히스토리"
-        >
-          ☰
-        </button>
+        {/* ✅ 오른쪽: 히스토리(☰) + 설정(⚙️) */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            onClick={() => {
+              setHistoryOpen(true);
+              setHistoryPage(1);
+              setMenuOpen(false);
+              setMenuAnchor(null);
+              setSettingsOpen(false);
+            }}
+            style={{
+              width: 44,
+              height: 40,
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              cursor: "pointer",
+              fontWeight: 900,
+              background: "#fff",
+              fontSize: 18,
+            }}
+            title="히스토리"
+            aria-label="히스토리"
+          >
+            ☰
+          </button>
+
+          <button
+            onClick={() => setSettingsOpen(true)}
+            style={{
+              width: 44,
+              height: 40,
+              borderRadius: 12,
+              border: "1px solid #ddd",
+              cursor: "pointer",
+              fontWeight: 900,
+              background: "#fff",
+              fontSize: 18,
+            }}
+            title="설정"
+            aria-label="설정"
+          >
+            ⚙️
+          </button>
+        </div>
       </div>
 
       {/* URL 입력 */}
@@ -850,7 +885,106 @@ export default function Page() {
       </div>
 
       {/* =========================
-          History Modal
+          ✅ Settings Modal (쿠키 세션 전용)
+         ========================= */}
+      {settingsOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+            zIndex: 10050,
+          }}
+          onClick={() => setSettingsOpen(false)}
+        >
+          <div
+            style={{
+              width: "min(720px, 100%)",
+              maxHeight: "80vh",
+              overflow: "auto",
+              background: "#fff",
+              borderRadius: 14,
+              border: "1px solid #ddd",
+              padding: 14,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div>
+                <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
+                <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                  Pixiv은 로그인/봇 차단 때문에 서버 추출이 막힐 수 있어. 필요할 때만 쿠키를 넣어줘.
+                  <br />
+                  ⚠️ 이 쿠키는 <b>로컬 저장 안 하고</b> 지금 세션에서만 사용해.
+                </div>
+              </div>
+
+              <button
+                onClick={() => setSettingsOpen(false)}
+                style={{
+                  height: 36,
+                  padding: "0 12px",
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  cursor: "pointer",
+                  fontWeight: 900,
+                  background: "#fff",
+                }}
+              >
+                닫기
+              </button>
+            </div>
+
+            <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 900, marginBottom: 8 }}>Pixiv 쿠키 (선택)</div>
+              <textarea
+                value={pixivCookie}
+                onChange={(e) => setPixivCookie(e.target.value)}
+                placeholder="예) PHPSESSID=...; device_token=...; (긴 문자열)"
+                style={{
+                  width: "100%",
+                  minHeight: 120,
+                  padding: 12,
+                  borderRadius: 10,
+                  border: "1px solid #ddd",
+                  whiteSpace: "pre-wrap",
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                  fontSize: 12,
+                }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
+                <button
+                  onClick={() => setPixivCookie("")}
+                  style={{
+                    height: 38,
+                    padding: "0 14px",
+                    borderRadius: 10,
+                    border: "1px solid #ddd",
+                    cursor: "pointer",
+                    fontWeight: 900,
+                    background: "#fff",
+                  }}
+                >
+                  입력 지우기
+                </button>
+
+                <div style={{ fontSize: 12, opacity: 0.7, alignSelf: "center" }}>
+                  상태: {pixivCookie.trim() ? "쿠키 입력됨(세션)" : "비어 있음"}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================
+          History Modal (원본 그대로)
          ========================= */}
       {historyOpen && (
         <div
@@ -1145,7 +1279,6 @@ export default function Page() {
                     이동
                   </button>
 
-                  {/* 버튼 간격을 넓게 */}
                   <div style={{ width: 8 }} />
 
                   <button
@@ -1196,17 +1329,10 @@ export default function Page() {
         </div>
       )}
 
-      {/* =========================
-          ✅ + 메뉴 팝업 (fixed 레이어)
-          - 모달 overflow에 잘리지 않음
-         ========================= */}
+      {/* ✅ + 메뉴 팝업 (fixed 레이어) */}
       {historyOpen && menuOpen && menuAnchor && (
         <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 10001,
-          }}
+          style={{ position: "fixed", inset: 0, zIndex: 10001 }}
           onClick={() => {
             setMenuOpen(false);
             setMenuAnchor(null);
@@ -1260,9 +1386,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* =========================
-          Move Picker Modal
-         ========================= */}
+      {/* Move Picker Modal */}
       {movePickerOpen && (
         <div
           role="dialog"
