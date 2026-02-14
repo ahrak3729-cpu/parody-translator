@@ -869,11 +869,26 @@ export default function Page() {
     padding: 14,
   };
 
-  const inputStyle: React.CSSProperties = {
-    padding: 10,
-    borderRadius: 10,
-    border: "1px solid rgba(0,0,0,0.18)",
-    background: "rgba(255,255,255,0.78)",
+  // ✅ 입력요소(테두리/배경 제거): "카드 1겹" 룩
+  const inputBareStyle: React.CSSProperties = {
+    width: "100%",
+    border: "none",
+    outline: "none",
+    background: "transparent",
+    color: textColor,
+    fontSize: 15,
+    lineHeight: 1.55,
+    padding: 0,
+    margin: 0,
+  };
+
+  // ✅ 고정 높이 + 내부 스크롤 textarea
+  const textareaBareStyle: React.CSSProperties = {
+    ...inputBareStyle,
+    height: 220,          // 고정 높이
+    overflowY: "auto",    // 내부 스크롤
+    resize: "none",       // 사용자가 늘리는 것도 금지
+    whiteSpace: "pre-wrap",
   };
 
   return (
@@ -966,15 +981,19 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ✅ URL 입력(카드 배경 적용) */}
+        {/* ✅ URL 입력(카드 1겹 / input 자체는 테두리&배경 없음) */}
         <div style={{ ...cardShellStyle, marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="URL 붙여넣기"
-              style={{ ...inputStyle, flex: 1 }}
-            />
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <div style={{ flex: 1 }}>
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="URL 붙여넣기"
+                style={inputBareStyle}
+              />
+              <div style={{ height: 1, background: "rgba(0,0,0,0.18)", marginTop: 10 }} />
+            </div>
+
             <button
               onClick={fetchFromUrl}
               disabled={isFetchingUrl || !url.trim()}
@@ -1003,23 +1022,13 @@ export default function Page() {
         >
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          {/* ✅ 직접 번역 영역도 cardBg 적용 */}
+          {/* ✅ 직접 번역 영역: 카드 1겹 / textarea 자체는 테두리&배경 없음 / 고정 높이 + 내부 스크롤 */}
           <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="원문을 직접 붙여넣기"
-              style={{
-                width: "100%",
-                height: 220,          // ✅ 고정 높이 (글자수 따라 커지지 않게)
-                overflowY: "auto",     // ✅ 내용 많으면 내부 스크롤
-                resize: "none",        // ✅ 사용자가 늘리는 것도 막기
-                padding: 12,
-                borderRadius: 10,
-                border: "1px solid rgba(0,0,0,0.18)",
-                whiteSpace: "pre-wrap",
-                background: "rgba(255,255,255,0.78)",
-              }}
+              style={textareaBareStyle}
             />
 
             <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
