@@ -77,6 +77,9 @@ type AppSettings = {
   viewerPadding: number;
   viewerRadius: number;
 
+  // ✅ 폰트
+  fontFamily: string;
+
   // 배경/색상 (HSL)
   appBgH: number;
   appBgS: number;
@@ -107,6 +110,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   viewerPadding: 16,
   viewerRadius: 14,
 
+  // ✅ 기본 폰트(시스템)
+  fontFamily:
+    'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
+
   // 오래된 종이 + 고급스러운 톤 (HSL)
   appBgH: 40,
   appBgS: 25,
@@ -128,7 +135,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   pixivCookie: "",
 };
 
-const SETTINGS_KEY = "parody_translator_settings_v1";
+const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지 (충돌 방지)
+const SESSION_KEY = "parody_translator_session_v1"; // ✅ 현재 화면 상태 저장용(신규)
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -289,46 +297,35 @@ function LabeledSlider(props: {
 }
 
 /* =========================
-   ✅ Draft(작업중 상태) 저장/복원
-   - settings/history 키와 충돌하지 않게 별도 키 사용
+   ✅ 세션(현재 화면) 저장/복원
 ========================= */
-const DRAFT_KEY = "parody_translator_draft_v1";
-
-type DraftState = {
+type AppSession = {
   url: string;
-  source: string;
-  resultBody: string;
-  showHeader: boolean;
+  manualOpen: boolean;
+
   seriesTitle: string;
   episodeNo: number;
   subtitle: string;
+
+  source: string;
+  resultBody: string;
+  showHeader: boolean;
+
+  currentHistoryId: string | null;
 };
 
-function loadDraft(): DraftState | null {
+function loadSession(): Partial<AppSession> | null {
   try {
-    const raw = localStorage.getItem(DRAFT_KEY);
+    const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-
-    return {
-      url: String((parsed as any).url ?? ""),
-      source: String((parsed as any).source ?? ""),
-      resultBody: String((parsed as any).resultBody ?? ""),
-      showHeader: !!(parsed as any).showHeader,
-      seriesTitle: String((parsed as any).seriesTitle ?? "패러디소설"),
-      episodeNo: Number((parsed as any).episodeNo ?? 1) || 1,
-      subtitle: String((parsed as any).subtitle ?? ""),
-    };
+    return JSON.parse(raw);
   } catch {
     return null;
   }
 }
 
-function saveDraftState(draft: DraftState) {
-  try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-  } catch {}
+function saveSession(s: AppSession) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(s));
 }
 
 export default function Page() {
@@ -340,7 +337,7 @@ export default function Page() {
     return loadSettings();
   });
 
-  // ✅ settings가 바뀌면 자동 저장 (새로고침 리셋 방지 강화)
+  // ✅ settings 변경 시 자동 저장 (새로고침 리셋 방지)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -348,12 +345,13 @@ export default function Page() {
     } catch {}
   }, [settings]);
 
-  // 설정 모달
+  // 설정 모달(draft)
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   function openSettings() {
+    // ✅ 항상 "현재 settings"를 draft로 가져옴
     setDraftSettings(settings);
     setSettingsDirty(false);
     setSettingsOpen(true);
@@ -366,6 +364,7 @@ export default function Page() {
     });
   }
   function saveDraft() {
+    // ✅ 저장 버튼을 눌렀을 때만 settings에 반영
     setSettings(draftSettings);
     try {
       saveSettings(draftSettings);
@@ -381,7 +380,6 @@ export default function Page() {
      URL 중심
   ========================= */
   const [url, setUrl] = useState("");
-
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
 
   /* =========================
@@ -406,45 +404,6 @@ export default function Page() {
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
   const abortRef = useRef<AbortController | null>(null);
-
-  /* =========================
-     ✅ Draft 복원: 첫 렌더 1회
-     - settings/history에는 손 안댐
-     - error/progress/isLoading은 복원하지 않음(오작동 방지)
-  ========================= */
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const d = loadDraft();
-    if (!d) return;
-
-    setUrl(d.url || "");
-    setSource(d.source || "");
-    setResultBody(d.resultBody || "");
-    setShowHeader(!!d.showHeader);
-    setSeriesTitle((d.seriesTitle || "패러디소설").trim() || "패러디소설");
-    setEpisodeNo(Math.max(1, Math.floor(d.episodeNo || 1)));
-    setSubtitle(d.subtitle || "");
-  }, []);
-
-  /* =========================
-     ✅ Draft 자동 저장
-     - 입력/결과/메타가 바뀌면 즉시 저장
-     - settings/history와 키 분리되어 충돌 없음
-  ========================= */
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    saveDraftState({
-      url,
-      source,
-      resultBody,
-      showHeader,
-      seriesTitle,
-      episodeNo,
-      subtitle,
-    });
-  }, [url, source, resultBody, showHeader, seriesTitle, episodeNo, subtitle]);
 
   /* =========================
      History / Folder
@@ -561,6 +520,49 @@ export default function Page() {
     const f = folders.find((x) => x.id === id);
     return f ? f.name : "알 수 없는 폴더";
   }
+
+  /* =========================
+     ✅ 새로고침 유지: 세션 복원
+     - settings는 SETTINGS_KEY로 이미 복원됨
+     - 화면 상태만 SESSION_KEY로 복원
+  ========================= */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const s = loadSession();
+    if (!s) return;
+
+    if (typeof s.url === "string") setUrl(s.url);
+    if (typeof s.manualOpen === "boolean") setManualOpen(s.manualOpen);
+
+    if (typeof s.seriesTitle === "string") setSeriesTitle(s.seriesTitle || "패러디소설");
+    if (typeof s.episodeNo === "number") setEpisodeNo(Math.max(1, Math.floor(s.episodeNo || 1)));
+    if (typeof s.subtitle === "string") setSubtitle(s.subtitle || "");
+
+    if (typeof s.source === "string") setSource(s.source);
+    if (typeof s.resultBody === "string") setResultBody(s.resultBody);
+    if (typeof s.showHeader === "boolean") setShowHeader(s.showHeader);
+
+    if (typeof s.currentHistoryId === "string" || s.currentHistoryId === null) setCurrentHistoryId(s.currentHistoryId ?? null);
+  }, []);
+
+  // ✅ 세션 자동 저장(현재 화면 상태가 안 날아가게)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const payload: AppSession = {
+        url,
+        manualOpen,
+        seriesTitle,
+        episodeNo,
+        subtitle,
+        source,
+        resultBody,
+        showHeader,
+        currentHistoryId,
+      };
+      saveSession(payload);
+    } catch {}
+  }, [url, manualOpen, seriesTitle, episodeNo, subtitle, source, resultBody, showHeader, currentHistoryId]);
 
   /* =========================
      폴더 재귀 유틸
@@ -944,7 +946,7 @@ export default function Page() {
   const cardBg = hsl(settings.cardBgH, settings.cardBgS, settings.cardBgL);
   const textColor = hsl(settings.textH, settings.textS, settings.textL);
 
-  // ✅ 공통 카드/입력 스타일 (URL/직접번역/결과 모두 동일 톤)
+  // ✅ 공통 카드: “카드 1겹” 규칙
   const cardShellStyle: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.18)",
     borderRadius: settings.viewerRadius,
@@ -952,12 +954,15 @@ export default function Page() {
     padding: 14,
   };
 
-  // ✅ 입력(단일 카드 1겹) : 자체 배경/테두리 제거
-  const inputStyle: React.CSSProperties = {
-    padding: 10,
-    borderRadius: 10,
-    border: "1px solid rgba(0,0,0,0.18)",
-    background: "rgba(255,255,255,0.78)",
+  // ✅ 카드 안에 들어가는 입력요소: 테두리/배경 없음(레이아웃 고정)
+  const innerInputBase: React.CSSProperties = {
+    width: "100%",
+    border: "none",
+    outline: "none",
+    background: "transparent",
+    color: textColor,
+    fontFamily: settings.fontFamily,
+    fontSize: 15,
   };
 
   return (
@@ -967,6 +972,7 @@ export default function Page() {
         background: appBg,
         color: textColor,
         position: "relative",
+        fontFamily: settings.fontFamily,
       }}
     >
       {/* ✅ 페이지 전체 배경 패턴 (있을 때만) */}
@@ -1050,15 +1056,20 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ✅ URL 입력(카드 배경 적용) */}
+        {/* ✅ URL 입력 (카드 1겹 + input 무테/무배경) */}
         <div style={{ ...cardShellStyle, marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="URL 붙여넣기"
-              style={{ ...inputStyle, flex: 1 }}
+              style={{
+                ...innerInputBase,
+                flex: 1,
+                padding: "10px 10px",
+              }}
             />
+
             <button
               onClick={fetchFromUrl}
               disabled={isFetchingUrl || !url.trim()}
@@ -1087,22 +1098,19 @@ export default function Page() {
         >
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          {/* ✅ 직접 번역 영역도 cardBg 적용 */}
+          {/* ✅ 직접 번역 카드 1겹 */}
           <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="원문을 직접 붙여넣기"
               style={{
-                width: "100%",
-                height: 220, // ✅ 고정 높이 (글자수 따라 커지지 않게)
-                overflowY: "auto", // ✅ 내용 많으면 내부 스크롤
-                resize: "none", // ✅ 사용자가 늘리는 것도 막기
-                padding: 12,
-                borderRadius: 10,
-                border: "1px solid rgba(0,0,0,0.18)",
+                ...innerInputBase,
+                height: 220, // ✅ 고정
+                overflowY: "auto", // ✅ 내부 스크롤
+                resize: "none",
+                padding: 10,
                 whiteSpace: "pre-wrap",
-                background: "rgba(255,255,255,0.78)",
               }}
             />
 
@@ -1167,6 +1175,7 @@ export default function Page() {
               lineHeight: settings.lineHeight,
               fontSize: settings.fontSize,
               color: textColor,
+              fontFamily: settings.fontFamily,
             }}
           >
             {!resultBody.trim() ? (
@@ -1279,8 +1288,44 @@ export default function Page() {
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
-                  {/* ✅ 미리보기: 편집바 위쪽 */}
-                  <div style={{ fontWeight: 900, opacity: 0.85 }}>미리보기</div>
+                  {/* ✅ 폰트 선택 (복구) */}
+                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 6 }}>폰트</div>
+                  <div style={{ marginTop: 8 }}>
+                    <select
+                      value={draftSettings.fontFamily}
+                      onChange={(e) => updateDraft({ fontFamily: e.target.value })}
+                      style={{
+                        width: "100%",
+                        height: 40,
+                        borderRadius: 10,
+                        border: "1px solid rgba(0,0,0,0.18)",
+                        padding: "0 10px",
+                        fontWeight: 800,
+                      }}
+                    >
+                      <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                        시스템(기본)
+                      </option>
+                      <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                        Noto Sans KR
+                      </option>
+                      <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>
+                        Noto Serif KR / 명조
+                      </option>
+                      <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
+                        산세리프(가독)
+                      </option>
+                      <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>
+                        세리프(소설 느낌)
+                      </option>
+                      <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
+                        고정폭(모노)
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* ✅ 미리보기 */}
+                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>미리보기</div>
                   <div
                     style={{
                       marginTop: 8,
@@ -1291,6 +1336,7 @@ export default function Page() {
                       color: hsl(draftSettings.textH, draftSettings.textS, draftSettings.textL),
                       lineHeight: draftSettings.lineHeight,
                       fontSize: draftSettings.fontSize,
+                      fontFamily: draftSettings.fontFamily,
                     }}
                   >
                     <div style={{ fontWeight: 900, fontSize: 22 }}>미리보기 제목</div>
@@ -1298,43 +1344,14 @@ export default function Page() {
                     <div style={{ marginTop: 14, whiteSpace: "pre-wrap" }}>
                       비는 새벽부터 계속 내리고 있었다.
                       {"\n\n"}
-                      이 박스의 글자크기/줄간격/여백/둥글기를 지금 값으로 확인할 수 있어.
+                      폰트/글자크기/줄간격/여백/둥글기를 지금 값으로 확인할 수 있어.
                     </div>
                   </div>
 
-                  {/* ✅ 라벨 옆 슬라이더 */}
-                  <LabeledSlider
-                    label="글자 크기"
-                    value={draftSettings.fontSize}
-                    min={12}
-                    max={30}
-                    onChange={(v) => updateDraft({ fontSize: v })}
-                    suffix="px"
-                  />
-                  <LabeledSlider
-                    label="줄간격"
-                    value={draftSettings.lineHeight}
-                    min={1.2}
-                    max={2.4}
-                    step={0.05}
-                    onChange={(v) => updateDraft({ lineHeight: v })}
-                  />
-                  <LabeledSlider
-                    label="결과 여백"
-                    value={draftSettings.viewerPadding}
-                    min={8}
-                    max={42}
-                    onChange={(v) => updateDraft({ viewerPadding: v })}
-                    suffix="px"
-                  />
-                  <LabeledSlider
-                    label="모서리 둥글기"
-                    value={draftSettings.viewerRadius}
-                    min={6}
-                    max={28}
-                    onChange={(v) => updateDraft({ viewerRadius: v })}
-                    suffix="px"
-                  />
+                  <LabeledSlider label="글자 크기" value={draftSettings.fontSize} min={12} max={30} onChange={(v) => updateDraft({ fontSize: v })} suffix="px" />
+                  <LabeledSlider label="줄간격" value={draftSettings.lineHeight} min={1.2} max={2.4} step={0.05} onChange={(v) => updateDraft({ lineHeight: v })} />
+                  <LabeledSlider label="결과 여백" value={draftSettings.viewerPadding} min={8} max={42} onChange={(v) => updateDraft({ viewerPadding: v })} suffix="px" />
+                  <LabeledSlider label="모서리 둥글기" value={draftSettings.viewerRadius} min={6} max={28} onChange={(v) => updateDraft({ viewerRadius: v })} suffix="px" />
                 </div>
               </details>
 
@@ -1406,6 +1423,7 @@ export default function Page() {
                               lineHeight: draftSettings.lineHeight,
                               fontSize: draftSettings.fontSize,
                               border: "1px solid rgba(0,0,0,0.12)",
+                              fontFamily: draftSettings.fontFamily,
                             }}
                           >
                             <div style={{ fontWeight: 900 }}>배경 미리보기</div>
