@@ -297,13 +297,13 @@ export default function Page() {
     return loadSettings();
   });
 
-  // ✅ 새로고침/하이드레이션 타이밍 이슈 방지: 마운트 시 다시 로드
+  // ✅ settings가 바뀌면 자동 저장 (새로고침 리셋 방지 강화)
   useEffect(() => {
+    if (typeof window === "undefined") return;
     try {
-      const s = loadSettings();
-      setSettings(s);
+      saveSettings(settings);
     } catch {}
-  }, []);
+  }, [settings]);
 
   // 설정 모달
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -447,7 +447,10 @@ export default function Page() {
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
   }, [history, selectedFolderId]);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)), [filteredHistory.length]);
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)),
+    [filteredHistory.length]
+  );
 
   const pagedHistory = useMemo(() => {
     const start = (historyPage - 1) * PAGE_SIZE;
@@ -852,28 +855,25 @@ export default function Page() {
   }
 
   /* =========================
-     현재 설정 기반 색상
+     현재 설정 기반 배경 스타일
   ========================= */
   const appBg = hsl(settings.appBgH, settings.appBgS, settings.appBgL);
   const cardBg = hsl(settings.cardBgH, settings.cardBgS, settings.cardBgL);
   const textColor = hsl(settings.textH, settings.textS, settings.textL);
 
-  // ✅ 공통 “카드 패널” 스타일: URL/직접번역 영역에도 동일 적용
-  const panelStyle: React.CSSProperties = {
+  // ✅ 공통 카드/입력 스타일 (URL/직접번역/결과 모두 동일 톤)
+  const cardShellStyle: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.18)",
     borderRadius: settings.viewerRadius,
     background: cardBg,
-    padding: 12,
+    padding: 14,
   };
 
-  const inputBase: React.CSSProperties = {
-    border: "1px solid rgba(0,0,0,0.18)",
-    borderRadius: 10,
+  const inputStyle: React.CSSProperties = {
     padding: 10,
-    background: "rgba(255,255,255,0.55)", // 카드 위에서 너무 진하지 않게
-    color: textColor,
-    caretColor: textColor,
-    outline: "none",
+    borderRadius: 10,
+    border: "1px solid rgba(0,0,0,0.18)",
+    background: "rgba(255,255,255,0.78)",
   };
 
   return (
@@ -966,14 +966,14 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ✅ URL 입력: 카드 패널 적용 */}
-        <div style={{ ...panelStyle, marginBottom: 12 }}>
+        {/* ✅ URL 입력(카드 배경 적용) */}
+        <div style={{ ...cardShellStyle, marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 8 }}>
             <input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="URL 붙여넣기"
-              style={{ ...inputBase, flex: 1 }}
+              style={{ ...inputStyle, flex: 1 }}
             />
             <button
               onClick={fetchFromUrl}
@@ -996,28 +996,33 @@ export default function Page() {
         </div>
 
         {/* 텍스트 직접 번역 */}
-        <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
+        <details
+          open={manualOpen}
+          onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
+          style={{ marginBottom: 12 }}
+        >
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          {/* ✅ 직접번역 영역도 카드 패널 적용 */}
-          <div style={{ ...panelStyle, marginTop: 10 }}>
+          {/* ✅ 직접 번역 영역도 cardBg 적용 */}
+          <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="원문을 직접 붙여넣기"
               style={{
-                ...inputBase,
                 width: "100%",
-                height: 200, // ✅ 고정
-                maxHeight: 200,
-                overflowY: "auto",
-                resize: "none", // ✅ 크기 변형 금지
+                height: 220,          // ✅ 고정 높이 (글자수 따라 커지지 않게)
+                overflowY: "auto",     // ✅ 내용 많으면 내부 스크롤
+                resize: "none",        // ✅ 사용자가 늘리는 것도 막기
+                padding: 12,
+                borderRadius: 10,
+                border: "1px solid rgba(0,0,0,0.18)",
                 whiteSpace: "pre-wrap",
-                lineHeight: 1.5,
+                background: "rgba(255,255,255,0.78)",
               }}
             />
 
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
               <button
                 onClick={() => runTranslation(source, { mode: "manual" })}
                 disabled={isLoading || !source.trim()}
@@ -1320,9 +1325,7 @@ export default function Page() {
                             }}
                           >
                             <div style={{ fontWeight: 900 }}>배경 미리보기</div>
-                            <div style={{ marginTop: 8, opacity: 0.8 }}>
-                              페이지 배경 + 패턴 + 카드 배경이 이렇게 보일 거야.
-                            </div>
+                            <div style={{ marginTop: 8, opacity: 0.8 }}>페이지 배경 + 패턴 + 카드 배경이 이렇게 보일 거야.</div>
                           </div>
                         </div>
                       </div>
@@ -1336,10 +1339,7 @@ export default function Page() {
                   <LabeledSlider label="Lightness" value={draftSettings.appBgL} min={0} max={100} onChange={(v) => updateDraft({ appBgL: v })} />
 
                   {/* 카드 배경 */}
-                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>카드 배경 색상</div>
-                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                    *이 값은 결과 카드뿐 아니라 URL/직접번역 영역 카드에도 같이 적용돼.
-                  </div>
+                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>결과 카드 배경 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.cardBgH} min={0} max={360} onChange={(v) => updateDraft({ cardBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.cardBgS} min={0} max={100} onChange={(v) => updateDraft({ cardBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.cardBgL} min={0} max={100} onChange={(v) => updateDraft({ cardBgL: v })} />
@@ -1379,31 +1379,9 @@ export default function Page() {
                     </button>
                   </div>
 
-                  <LabeledSlider
-                    label="무늬 투명도"
-                    value={draftSettings.bgPatternOpacity}
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    onChange={(v) => updateDraft({ bgPatternOpacity: v })}
-                  />
-                  <LabeledSlider
-                    label="무늬 크기"
-                    value={draftSettings.bgPatternSize}
-                    min={120}
-                    max={1600}
-                    step={10}
-                    onChange={(v) => updateDraft({ bgPatternSize: v })}
-                    suffix="px"
-                  />
-                  <LabeledSlider
-                    label="무늬 강조"
-                    value={draftSettings.bgPatternBlend}
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    onChange={(v) => updateDraft({ bgPatternBlend: v })}
-                  />
+                  <LabeledSlider label="무늬 투명도" value={draftSettings.bgPatternOpacity} min={0} max={1} step={0.01} onChange={(v) => updateDraft({ bgPatternOpacity: v })} />
+                  <LabeledSlider label="무늬 크기" value={draftSettings.bgPatternSize} min={120} max={1600} step={10} onChange={(v) => updateDraft({ bgPatternSize: v })} suffix="px" />
+                  <LabeledSlider label="무늬 강조" value={draftSettings.bgPatternBlend} min={0} max={1} step={0.01} onChange={(v) => updateDraft({ bgPatternBlend: v })} />
                 </div>
               </details>
 
