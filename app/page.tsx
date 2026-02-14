@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /* =========================
    자동 분할 (긴 글 대응)
@@ -296,6 +296,14 @@ export default function Page() {
     if (typeof window === "undefined") return DEFAULT_SETTINGS;
     return loadSettings();
   });
+
+  // ✅ 새로고침/하이드레이션 타이밍 이슈 방지: 마운트 시 다시 로드
+  useEffect(() => {
+    try {
+      const s = loadSettings();
+      setSettings(s);
+    } catch {}
+  }, []);
 
   // 설정 모달
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -844,11 +852,29 @@ export default function Page() {
   }
 
   /* =========================
-     현재 설정 기반 배경 스타일
+     현재 설정 기반 색상
   ========================= */
   const appBg = hsl(settings.appBgH, settings.appBgS, settings.appBgL);
   const cardBg = hsl(settings.cardBgH, settings.cardBgS, settings.cardBgL);
   const textColor = hsl(settings.textH, settings.textS, settings.textL);
+
+  // ✅ 공통 “카드 패널” 스타일: URL/직접번역 영역에도 동일 적용
+  const panelStyle: React.CSSProperties = {
+    border: "1px solid rgba(0,0,0,0.18)",
+    borderRadius: settings.viewerRadius,
+    background: cardBg,
+    padding: 12,
+  };
+
+  const inputBase: React.CSSProperties = {
+    border: "1px solid rgba(0,0,0,0.18)",
+    borderRadius: 10,
+    padding: 10,
+    background: "rgba(255,255,255,0.55)", // 카드 위에서 너무 진하지 않게
+    color: textColor,
+    caretColor: textColor,
+    outline: "none",
+  };
 
   return (
     <div
@@ -940,63 +966,58 @@ export default function Page() {
           </div>
         </div>
 
-        {/* URL 입력 */}
-        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="URL 붙여넣기"
-            style={{
-              flex: 1,
-              padding: 10,
-              borderRadius: 10,
-              border: "1px solid rgba(0,0,0,0.18)",
-              background: "rgba(255,255,255,0.85)",
-            }}
-          />
-          <button
-            onClick={fetchFromUrl}
-            disabled={isFetchingUrl || !url.trim()}
-            style={{
-              height: 40,
-              padding: "0 12px",
-              borderRadius: 10,
-              border: "1px solid rgba(0,0,0,0.18)",
-              cursor: isFetchingUrl || !url.trim() ? "not-allowed" : "pointer",
-              fontWeight: 900,
-              background: "#fff",
-              opacity: isFetchingUrl || !url.trim() ? 0.6 : 1,
-            }}
-          >
-            {isFetchingUrl ? "불러오는 중…" : "본문 불러오기"}
-          </button>
+        {/* ✅ URL 입력: 카드 패널 적용 */}
+        <div style={{ ...panelStyle, marginBottom: 12 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="URL 붙여넣기"
+              style={{ ...inputBase, flex: 1 }}
+            />
+            <button
+              onClick={fetchFromUrl}
+              disabled={isFetchingUrl || !url.trim()}
+              style={{
+                height: 40,
+                padding: "0 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(0,0,0,0.18)",
+                cursor: isFetchingUrl || !url.trim() ? "not-allowed" : "pointer",
+                fontWeight: 900,
+                background: "#fff",
+                opacity: isFetchingUrl || !url.trim() ? 0.6 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {isFetchingUrl ? "불러오는 중…" : "본문 불러오기"}
+            </button>
+          </div>
         </div>
 
         {/* 텍스트 직접 번역 */}
-        <details
-          open={manualOpen}
-          onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
-          style={{ marginBottom: 12 }}
-        >
+        <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          <div style={{ marginTop: 10 }}>
+          {/* ✅ 직접번역 영역도 카드 패널 적용 */}
+          <div style={{ ...panelStyle, marginTop: 10 }}>
             <textarea
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="원문을 직접 붙여넣기"
               style={{
+                ...inputBase,
                 width: "100%",
-                minHeight: 160,
-                padding: 12,
-                borderRadius: 10,
-                border: "1px solid rgba(0,0,0,0.18)",
+                height: 200, // ✅ 고정
+                maxHeight: 200,
+                overflowY: "auto",
+                resize: "none", // ✅ 크기 변형 금지
                 whiteSpace: "pre-wrap",
-                background: "rgba(255,255,255,0.85)",
+                lineHeight: 1.5,
               }}
             />
 
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
               <button
                 onClick={() => runTranslation(source, { mode: "manual" })}
                 disabled={isLoading || !source.trim()}
@@ -1233,7 +1254,7 @@ export default function Page() {
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>배경 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
-                  {/* ✅ 배경 미리보기: 항상 보이게 sticky + 크게 */}
+                  {/* ✅ 배경 미리보기: sticky */}
                   <div
                     style={{
                       position: "sticky",
@@ -1315,7 +1336,10 @@ export default function Page() {
                   <LabeledSlider label="Lightness" value={draftSettings.appBgL} min={0} max={100} onChange={(v) => updateDraft({ appBgL: v })} />
 
                   {/* 카드 배경 */}
-                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>결과 카드 배경 색상</div>
+                  <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>카드 배경 색상</div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                    *이 값은 결과 카드뿐 아니라 URL/직접번역 영역 카드에도 같이 적용돼.
+                  </div>
                   <LabeledSlider label="Hue" value={draftSettings.cardBgH} min={0} max={360} onChange={(v) => updateDraft({ cardBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.cardBgS} min={0} max={100} onChange={(v) => updateDraft({ cardBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.cardBgL} min={0} max={100} onChange={(v) => updateDraft({ cardBgL: v })} />
