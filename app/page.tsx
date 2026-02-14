@@ -288,6 +288,49 @@ function LabeledSlider(props: {
   );
 }
 
+/* =========================
+   ✅ Draft(작업중 상태) 저장/복원
+   - settings/history 키와 충돌하지 않게 별도 키 사용
+========================= */
+const DRAFT_KEY = "parody_translator_draft_v1";
+
+type DraftState = {
+  url: string;
+  source: string;
+  resultBody: string;
+  showHeader: boolean;
+  seriesTitle: string;
+  episodeNo: number;
+  subtitle: string;
+};
+
+function loadDraft(): DraftState | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+
+    return {
+      url: String((parsed as any).url ?? ""),
+      source: String((parsed as any).source ?? ""),
+      resultBody: String((parsed as any).resultBody ?? ""),
+      showHeader: !!(parsed as any).showHeader,
+      seriesTitle: String((parsed as any).seriesTitle ?? "패러디소설"),
+      episodeNo: Number((parsed as any).episodeNo ?? 1) || 1,
+      subtitle: String((parsed as any).subtitle ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveDraftState(draft: DraftState) {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch {}
+}
+
 export default function Page() {
   /* =========================
      Settings (persisted)
@@ -338,6 +381,7 @@ export default function Page() {
      URL 중심
   ========================= */
   const [url, setUrl] = useState("");
+
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
 
   /* =========================
@@ -362,6 +406,45 @@ export default function Page() {
   const [isLoading, setIsLoading] = useState(false);
   const [progress, setProgress] = useState<Progress>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  /* =========================
+     ✅ Draft 복원: 첫 렌더 1회
+     - settings/history에는 손 안댐
+     - error/progress/isLoading은 복원하지 않음(오작동 방지)
+  ========================= */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const d = loadDraft();
+    if (!d) return;
+
+    setUrl(d.url || "");
+    setSource(d.source || "");
+    setResultBody(d.resultBody || "");
+    setShowHeader(!!d.showHeader);
+    setSeriesTitle((d.seriesTitle || "패러디소설").trim() || "패러디소설");
+    setEpisodeNo(Math.max(1, Math.floor(d.episodeNo || 1)));
+    setSubtitle(d.subtitle || "");
+  }, []);
+
+  /* =========================
+     ✅ Draft 자동 저장
+     - 입력/결과/메타가 바뀌면 즉시 저장
+     - settings/history와 키 분리되어 충돌 없음
+  ========================= */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    saveDraftState({
+      url,
+      source,
+      resultBody,
+      showHeader,
+      seriesTitle,
+      episodeNo,
+      subtitle,
+    });
+  }, [url, source, resultBody, showHeader, seriesTitle, episodeNo, subtitle]);
 
   /* =========================
      History / Folder
@@ -869,26 +952,12 @@ export default function Page() {
     padding: 14,
   };
 
-  // ✅ 입력요소(테두리/배경 제거): "카드 1겹" 룩
-  const inputBareStyle: React.CSSProperties = {
-    width: "100%",
-    border: "none",
-    outline: "none",
-    background: "transparent",
-    color: textColor,
-    fontSize: 15,
-    lineHeight: 1.55,
-    padding: 0,
-    margin: 0,
-  };
-
-  // ✅ 고정 높이 + 내부 스크롤 textarea
-  const textareaBareStyle: React.CSSProperties = {
-    ...inputBareStyle,
-    height: 220,          // 고정 높이
-    overflowY: "auto",    // 내부 스크롤
-    resize: "none",       // 사용자가 늘리는 것도 금지
-    whiteSpace: "pre-wrap",
+  // ✅ 입력(단일 카드 1겹) : 자체 배경/테두리 제거
+  const inputStyle: React.CSSProperties = {
+    padding: 10,
+    borderRadius: 10,
+    border: "1px solid rgba(0,0,0,0.18)",
+    background: "rgba(255,255,255,0.78)",
   };
 
   return (
@@ -981,19 +1050,15 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ✅ URL 입력(카드 1겹 / input 자체는 테두리&배경 없음) */}
+        {/* ✅ URL 입력(카드 배경 적용) */}
         <div style={{ ...cardShellStyle, marginBottom: 12 }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <div style={{ flex: 1 }}>
-              <input
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="URL 붙여넣기"
-                style={inputBareStyle}
-              />
-              <div style={{ height: 1, background: "rgba(0,0,0,0.18)", marginTop: 10 }} />
-            </div>
-
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="URL 붙여넣기"
+              style={{ ...inputStyle, flex: 1 }}
+            />
             <button
               onClick={fetchFromUrl}
               disabled={isFetchingUrl || !url.trim()}
@@ -1022,13 +1087,23 @@ export default function Page() {
         >
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          {/* ✅ 직접 번역 영역: 카드 1겹 / textarea 자체는 테두리&배경 없음 / 고정 높이 + 내부 스크롤 */}
+          {/* ✅ 직접 번역 영역도 cardBg 적용 */}
           <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
               onChange={(e) => setSource(e.target.value)}
               placeholder="원문을 직접 붙여넣기"
-              style={textareaBareStyle}
+              style={{
+                width: "100%",
+                height: 220, // ✅ 고정 높이 (글자수 따라 커지지 않게)
+                overflowY: "auto", // ✅ 내용 많으면 내부 스크롤
+                resize: "none", // ✅ 사용자가 늘리는 것도 막기
+                padding: 12,
+                borderRadius: 10,
+                border: "1px solid rgba(0,0,0,0.18)",
+                whiteSpace: "pre-wrap",
+                background: "rgba(255,255,255,0.78)",
+              }}
             />
 
             <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10 }}>
