@@ -332,18 +332,34 @@ export default function Page() {
   /* =========================
      Settings (persisted)
   ========================= */
-  const [settings, setSettings] = useState<AppSettings>(() => {
-    if (typeof window === "undefined") return DEFAULT_SETTINGS;
-    return loadSettings();
-  });
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // ✅ settings 변경 시 자동 저장 (새로고침 리셋 방지)
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      saveSettings(settings);
-    } catch {}
-  }, [settings]);
+// ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
+const settingsHydratedRef = useRef(false);
+
+// ✅ 마운트 후 1회: localStorage에서 settings 로드
+useEffect(() => {
+  if (typeof window === "undefined") return;
+
+  const loaded = loadSettings();
+  setSettings(loaded);
+
+  // 설정 모달 draft도 동기화 (초기 폰트/배경이 안 꼬이게)
+  setDraftSettings(loaded);
+  setSettingsDirty(false);
+
+  settingsHydratedRef.current = true;
+}, []);
+
+// ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
+useEffect(() => {
+  if (typeof window === "undefined") return;
+  if (!settingsHydratedRef.current) return;
+
+  try {
+    saveSettings(settings);
+  } catch {}
+}, [settings]);
 
   // 설정 모달(draft)
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -374,7 +390,15 @@ export default function Page() {
   function undoDraft() {
     setDraftSettings(settings);
     setSettingsDirty(false);
-  }
+  } 
+   function saveDraft() {
+  setSettings(draftSettings);
+  try {
+    // 로드가 끝난 상태일 때만 저장(안전)
+    if (settingsHydratedRef.current) saveSettings(draftSettings);
+  } catch {}
+  setSettingsDirty(false);
+   }
 
   /* =========================
      URL 중심
