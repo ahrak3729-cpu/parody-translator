@@ -391,14 +391,6 @@ useEffect(() => {
     setDraftSettings(settings);
     setSettingsDirty(false);
   } 
-   function saveDraft() {
-  setSettings(draftSettings);
-  try {
-    // 로드가 끝난 상태일 때만 저장(안전)
-    if (settingsHydratedRef.current) saveSettings(draftSettings);
-  } catch {}
-  setSettingsDirty(false);
-   }
 
   /* =========================
      URL 중심
