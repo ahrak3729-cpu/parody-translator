@@ -3,6 +3,7 @@ import { JSDOM } from "jsdom";
 import { Readability } from "@mozilla/readability";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 /** -------------------------
  *  Helpers
