@@ -334,44 +334,44 @@ export default function Page() {
   ========================= */
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-// ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
-const settingsHydratedRef = useRef(false);
-
-// ✅ 마운트 후 1회: localStorage에서 settings 로드
-useEffect(() => {
-  if (typeof window === "undefined") return;
-
-  const loaded = loadSettings();
-  setSettings(loaded);
-
-  // 설정 모달 draft도 동기화 (초기 폰트/배경이 안 꼬이게)
-  setDraftSettings(loaded);
-  setSettingsDirty(false);
-
-  settingsHydratedRef.current = true;
-}, []);
-
-// ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
-useEffect(() => {
-  if (typeof window === "undefined") return;
-  if (!settingsHydratedRef.current) return;
-
-  try {
-    saveSettings(settings);
-  } catch {}
-}, [settings]);
-
-  // 설정 모달(draft)
+  // ✅ 설정 모달(draft) — settings 다음에 바로 선언(순서 안정화)
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsDirty, setSettingsDirty] = useState(false);
 
+  // ✅ "설정을 로드한 뒤에만 저장" 가드
+  const settingsHydratedRef = useRef(false);
+
+  // ✅ 마운트 후 1회: localStorage에서 settings 로드
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const loaded = loadSettings();
+    setSettings(loaded);
+
+    // draft도 동기화 (초기 폰트/배경 꼬임 방지)
+    setDraftSettings(loaded);
+    setSettingsDirty(false);
+
+    settingsHydratedRef.current = true;
+  }, []);
+
+  // ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!settingsHydratedRef.current) return;
+
+    try {
+      saveSettings(settings);
+    } catch {}
+  }, [settings]);
+
   function openSettings() {
-    // ✅ 항상 "현재 settings"를 draft로 가져옴
     setDraftSettings(settings);
     setSettingsDirty(false);
     setSettingsOpen(true);
   }
+
   function updateDraft(patch: Partial<AppSettings>) {
     setDraftSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -379,18 +379,23 @@ useEffect(() => {
       return next;
     });
   }
+
   function saveDraft() {
-    // ✅ 저장 버튼을 눌렀을 때만 settings에 반영
     setSettings(draftSettings);
     try {
       saveSettings(draftSettings);
     } catch {}
     setSettingsDirty(false);
   }
+
   function undoDraft() {
     setDraftSettings(settings);
     setSettingsDirty(false);
-  } 
+  }
+
+  /* =========================
+     (여기부터는 네 기존 코드 그대로)
+  ========================= */
 
   /* =========================
      URL 중심
