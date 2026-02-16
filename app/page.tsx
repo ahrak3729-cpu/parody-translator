@@ -136,11 +136,77 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지 (충돌 방지)
-const SESSION_KEY = "parody_translator_session_v1"; // 현재 화면 상태 저장용(신규)
+const SESSION_KEY = "parody_translator_session_v1"; // ✅ 현재 화면 상태 저장용(신규)
 
-// ✅ Pixiv 프리셋 토글 (설정과 별개로 저장)
+/* =========================
+   ✅ Pixiv 프리셋 (토글 + 오버라이드)
+========================= */
 const PIXIV_PRESET_KEY = "parody_translator_pixiv_preset_v1";
+const PIXIV_PRESET_OVERRIDES_KEY = "parody_translator_pixiv_preset_overrides_v1";
 
+type PixivPresetOverrides = Partial<AppSettings>;
+
+const PIXIV_PRESET_DEFAULT: PixivPresetOverrides = {
+  fontSize: 17,
+  lineHeight: 1.85,
+  viewerPadding: 18,
+  viewerRadius: 16,
+
+  // 소설 느낌(세리프)
+  fontFamily: 'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif',
+
+  // 살짝 더 “종이” 느낌
+  appBgH: 40,
+  appBgS: 22,
+  appBgL: 96,
+
+  cardBgH: 40,
+  cardBgS: 18,
+  cardBgL: 99,
+
+  textH: 28,
+  textS: 28,
+  textL: 14,
+};
+
+function loadPixivPresetEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(PIXIV_PRESET_KEY);
+    if (!raw) return false;
+    return !!JSON.parse(raw);
+  } catch {
+    return false;
+  }
+}
+
+function savePixivPresetEnabled(v: boolean) {
+  localStorage.setItem(PIXIV_PRESET_KEY, JSON.stringify(!!v));
+}
+
+function loadPixivPresetOverrides(): PixivPresetOverrides {
+  try {
+    const raw = localStorage.getItem(PIXIV_PRESET_OVERRIDES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    return parsed as PixivPresetOverrides;
+  } catch {
+    return {};
+  }
+}
+
+function savePixivPresetOverrides(v: PixivPresetOverrides) {
+  localStorage.setItem(PIXIV_PRESET_OVERRIDES_KEY, JSON.stringify(v || {}));
+}
+
+function applyPixivPreset(base: AppSettings, enabled: boolean, overrides: PixivPresetOverrides): AppSettings {
+  if (!enabled) return base;
+  return { ...base, ...PIXIV_PRESET_DEFAULT, ...(overrides || {}) };
+}
+
+/* =========================
+   Utils
+========================= */
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -165,56 +231,6 @@ function loadSettings(): AppSettings {
 
 function saveSettings(s: AppSettings) {
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-}
-
-/* =========================
-   ✅ Pixiv 프리셋(레이어)
-   - 원본 settings는 건드리지 않고,
-     화면에 적용할 때만 덮어씌움
-========================= */
-const PIXIV_PRESET_LAYER: Partial<AppSettings> = {
-  // 가독성/소설 느낌
-  fontSize: 17,
-  lineHeight: 1.85,
-  viewerPadding: 18,
-  viewerRadius: 16,
-
-  // 소설 느낌(세리프)
-  fontFamily: 'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif',
-
-  // 종이톤 조금 더 밝게
-  appBgH: 40,
-  appBgS: 22,
-  appBgL: 96,
-
-  cardBgH: 40,
-  cardBgS: 18,
-  cardBgL: 99,
-
-  // 글자는 너무 새까맣지 않게
-  textH: 28,
-  textS: 28,
-  textL: 14,
-};
-
-function applyPixivPreset(base: AppSettings, enabled: boolean): AppSettings {
-  if (!enabled) return base;
-  return { ...base, ...PIXIV_PRESET_LAYER };
-}
-
-function loadPixivPresetEnabled(): boolean {
-  try {
-    const raw = localStorage.getItem(PIXIV_PRESET_KEY);
-    if (!raw) return false;
-    const parsed = JSON.parse(raw);
-    return !!parsed;
-  } catch {
-    return false;
-  }
-}
-
-function savePixivPresetEnabled(v: boolean) {
-  localStorage.setItem(PIXIV_PRESET_KEY, JSON.stringify(!!v));
 }
 
 /* =========================
@@ -387,12 +403,23 @@ export default function Page() {
   ========================= */
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // ✅ Pixiv 프리셋 토글(설정과 별개)
-  const [pixivPresetEnabled, setPixivPresetEnabled] = useState(false);
-
   // ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
   const settingsHydratedRef = useRef(false);
+
+  // ✅ Pixiv 프리셋 (persisted)
+  const [pixivPresetEnabled, setPixivPresetEnabled] = useState(false);
+  const [pixivPresetOverrides, setPixivPresetOverrides] = useState<PixivPresetOverrides>({});
   const pixivPresetHydratedRef = useRef(false);
+  const pixivOverridesHydratedRef = useRef(false);
+
+  // ✅ Pixiv 프리셋 편집 draft
+  const [pixivDraftOverrides, setPixivDraftOverrides] = useState<PixivPresetOverrides>({});
+  const [pixivDirty, setPixivDirty] = useState(false);
+
+  // 설정 모달(draft)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [settingsDirty, setSettingsDirty] = useState(false);
 
   // ✅ 마운트 후 1회: localStorage에서 settings + pixiv preset 로드
   useEffect(() => {
@@ -401,15 +428,24 @@ export default function Page() {
     const loaded = loadSettings();
     setSettings(loaded);
 
-    const loadedPreset = loadPixivPresetEnabled();
-    setPixivPresetEnabled(loadedPreset);
-
     // 설정 모달 draft도 동기화 (초기 폰트/배경이 안 꼬이게)
     setDraftSettings(loaded);
     setSettingsDirty(false);
 
     settingsHydratedRef.current = true;
+
+    // Pixiv preset
+    const enabled = loadPixivPresetEnabled();
+    setPixivPresetEnabled(enabled);
+
+    const overrides = loadPixivPresetOverrides();
+    setPixivPresetOverrides(overrides);
+
+    setPixivDraftOverrides(overrides);
+    setPixivDirty(false);
+
     pixivPresetHydratedRef.current = true;
+    pixivOverridesHydratedRef.current = true;
   }, []);
 
   // ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
@@ -422,25 +458,32 @@ export default function Page() {
     } catch {}
   }, [settings]);
 
-  // ✅ pixivPresetEnabled 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
+  // ✅ pixiv preset 저장
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!pixivPresetHydratedRef.current) return;
-
     try {
       savePixivPresetEnabled(pixivPresetEnabled);
     } catch {}
   }, [pixivPresetEnabled]);
 
-  // 설정 모달(draft)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
-  const [settingsDirty, setSettingsDirty] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!pixivOverridesHydratedRef.current) return;
+    try {
+      savePixivPresetOverrides(pixivPresetOverrides);
+    } catch {}
+  }, [pixivPresetOverrides]);
 
   function openSettings() {
     // ✅ 항상 "현재 settings"를 draft로 가져옴
     setDraftSettings(settings);
     setSettingsDirty(false);
+
+    // ✅ Pixiv 프리셋 draft도 현재 값으로 동기화
+    setPixivDraftOverrides(pixivPresetOverrides);
+    setPixivDirty(false);
+
     setSettingsOpen(true);
   }
   function updateDraft(patch: Partial<AppSettings>) {
@@ -462,6 +505,43 @@ export default function Page() {
     setDraftSettings(settings);
     setSettingsDirty(false);
   }
+
+  // Pixiv preset draft helpers
+  function updatePixivDraft(patch: PixivPresetOverrides) {
+    setPixivDraftOverrides((prev) => {
+      const next = { ...prev, ...patch };
+      setPixivDirty(true);
+      return next;
+    });
+  }
+  function savePixivDraft() {
+    setPixivPresetOverrides(pixivDraftOverrides);
+    try {
+      savePixivPresetOverrides(pixivDraftOverrides);
+    } catch {}
+    setPixivDirty(false);
+  }
+  function undoPixivDraft() {
+    setPixivDraftOverrides(pixivPresetOverrides);
+    setPixivDirty(false);
+  }
+  function resetPixivDraftToDefault() {
+    setPixivDraftOverrides({});
+    setPixivDirty(true);
+  }
+
+  /* =========================
+     ✅ 적용되는 설정(= Pixiv 프리셋 반영)
+  ========================= */
+  const effectiveSettings = useMemo(() => {
+    return applyPixivPreset(settings, pixivPresetEnabled, pixivPresetOverrides);
+  }, [settings, pixivPresetEnabled, pixivPresetOverrides]);
+
+  const effectiveDraftSettings = useMemo(() => {
+    // 설정 모달의 미리보기는 “저장 전 draftSettings” 기준 + (현재 Pixiv 프리셋 토글/오버라이드 반영)
+    // 여기서는 base로 draftSettings를 쓰고, 오버라이드는 “편집 중 draft”로 반영해서 즉시 확인 가능하게 함
+    return applyPixivPreset(draftSettings, pixivPresetEnabled, pixivDraftOverrides);
+  }, [draftSettings, pixivPresetEnabled, pixivDraftOverrides]);
 
   /* =========================
      URL 중심
@@ -576,10 +656,7 @@ export default function Page() {
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
   }, [history, selectedFolderId]);
 
-  const totalPages = useMemo(
-    () => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)),
-    [filteredHistory.length]
-  );
+  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)), [filteredHistory.length]);
 
   const pagedHistory = useMemo(() => {
     const start = (historyPage - 1) * PAGE_SIZE;
@@ -610,8 +687,6 @@ export default function Page() {
 
   /* =========================
      ✅ 새로고침 유지: 세션 복원
-     - settings는 SETTINGS_KEY로 이미 복원됨
-     - 화면 상태만 SESSION_KEY로 복원
   ========================= */
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -982,8 +1057,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: u,
-          // ✅ 쿠키는 "진짜 settings" 기준 (프리셋 토글과 무관)
-          cookie: settings.pixivCookie?.trim() || "",
+          cookie: effectiveSettings.pixivCookie?.trim() || "",
         }),
       });
 
@@ -1003,9 +1077,7 @@ export default function Page() {
       if (data?.title) setSeriesTitle(String(data.title));
       const text = String(data?.text ?? "");
       if (!text.trim()) {
-        throw new Error(
-          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
-        );
+        throw new Error("본문을 가져왔지만 내용이 비어있어요. (차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘.");
       }
 
       setSource(text);
@@ -1027,15 +1099,6 @@ export default function Page() {
     setMenuAnchor({ right, bottom });
     setMenuOpen(true);
   }
-
-  /* =========================
-     ✅ "실제 화면 적용" 설정
-     - 원본 settings는 그대로
-     - Pixiv 프리셋 ON이면 레이어로 덮어씌움
-  ========================= */
-  const effectiveSettings = useMemo(() => {
-    return applyPixivPreset(settings, pixivPresetEnabled);
-  }, [settings, pixivPresetEnabled]);
 
   /* =========================
      현재 설정 기반 배경 스타일
@@ -1093,9 +1156,7 @@ export default function Page() {
               pointerEvents: "none",
               position: "fixed",
               inset: 0,
-              background: `linear-gradient(0deg, rgba(0,0,0,${
-                effectiveSettings.bgPatternBlend * 0.06
-              }) 0%, rgba(0,0,0,0) 70%)`,
+              background: `linear-gradient(0deg, rgba(0,0,0,${effectiveSettings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
             }}
           />
         </>
@@ -1379,13 +1440,13 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* ✅ Pixiv 프리셋 토글 (저장과 무관 / 즉시 적용) */}
+              {/* ✅ Pixiv 프리셋 토글 + 편집 */}
               <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12, marginTop: 6 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
                   <div>
                     <div style={{ fontWeight: 900 }}>Pixiv 소설 전용 프리셋</div>
                     <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                      ON이면 화면에만 덮어씌워져. (원래 설정은 안 바뀜)
+                      ON이면 Pixiv용 스타일이 적용돼. (기본 설정은 그대로 저장되어 있어)
                     </div>
                   </div>
 
@@ -1399,6 +1460,185 @@ export default function Page() {
                     <span style={{ fontWeight: 900 }}>{pixivPresetEnabled ? "ON" : "OFF"}</span>
                   </label>
                 </div>
+
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 900 }}>Pixiv 프리셋 편집</summary>
+
+                  <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>
+                        이 값은 Pixiv 프리셋에만 저장돼. {pixivDirty ? "· 변경됨" : "· 저장됨"}
+                      </div>
+
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <button
+                          onClick={undoPixivDraft}
+                          style={{
+                            height: 34,
+                            padding: "0 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(0,0,0,0.18)",
+                            background: "#fff",
+                            fontWeight: 900,
+                          }}
+                        >
+                          되돌리기
+                        </button>
+
+                        <button
+                          onClick={resetPixivDraftToDefault}
+                          style={{
+                            height: 34,
+                            padding: "0 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(0,0,0,0.18)",
+                            background: "#fff",
+                            fontWeight: 900,
+                          }}
+                        >
+                          기본값으로
+                        </button>
+
+                        <button
+                          onClick={savePixivDraft}
+                          disabled={!pixivDirty}
+                          style={{
+                            height: 34,
+                            padding: "0 12px",
+                            borderRadius: 10,
+                            border: "1px solid rgba(0,0,0,0.18)",
+                            fontWeight: 900,
+                            background: pixivDirty ? "#111" : "#eee",
+                            color: pixivDirty ? "#fff" : "#777",
+                            cursor: pixivDirty ? "pointer" : "not-allowed",
+                          }}
+                        >
+                          저장
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* ✅ 미리보기 (Pixiv 프리셋 draft 기준) */}
+                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>미리보기</div>
+                    <div
+                      style={{
+                        marginTop: 8,
+                        border: "1px solid rgba(0,0,0,0.18)",
+                        borderRadius: effectiveDraftSettings.viewerRadius,
+                        padding: effectiveDraftSettings.viewerPadding,
+                        background: hsl(effectiveDraftSettings.cardBgH, effectiveDraftSettings.cardBgS, effectiveDraftSettings.cardBgL),
+                        color: hsl(effectiveDraftSettings.textH, effectiveDraftSettings.textS, effectiveDraftSettings.textL),
+                        lineHeight: effectiveDraftSettings.lineHeight,
+                        fontSize: effectiveDraftSettings.fontSize,
+                        fontFamily: effectiveDraftSettings.fontFamily,
+                      }}
+                    >
+                      <div style={{ fontWeight: 900, fontSize: 22 }}>미리보기 제목</div>
+                      <div style={{ opacity: 0.72, marginTop: 6 }}>제 1화 · 부제목</div>
+                      <div style={{ marginTop: 14, whiteSpace: "pre-wrap" }}>
+                        비는 새벽부터 계속 내리고 있었다.
+                        {"\n\n"}
+                        Pixiv 프리셋 편집값이 지금 화면에 바로 반영돼.
+                      </div>
+                    </div>
+
+                    {/* 폰트 */}
+                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>폰트</div>
+                    <div style={{ marginTop: 8 }}>
+                      <select
+                        value={(pixivDraftOverrides.fontFamily as string) ?? ""}
+                        onChange={(e) => updatePixivDraft({ fontFamily: e.target.value })}
+                        style={{
+                          width: "100%",
+                          height: 40,
+                          borderRadius: 10,
+                          border: "1px solid rgba(0,0,0,0.18)",
+                          padding: "0 10px",
+                          fontWeight: 800,
+                        }}
+                      >
+                        <option value="">(Pixiv 기본 프리셋 폰트 사용)</option>
+                        <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                          시스템(기본)
+                        </option>
+                        <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                          Noto Sans KR
+                        </option>
+                        <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>Noto Serif KR / 명조</option>
+                        <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
+                          산세리프(가독)
+                        </option>
+                        <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>세리프(소설 느낌)</option>
+                        <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
+                          고정폭(모노)
+                        </option>
+                      </select>
+                    </div>
+
+                    {/* 서식 */}
+                    <LabeledSlider
+                      label="글자 크기"
+                      value={Number((pixivDraftOverrides.fontSize as number) ?? (PIXIV_PRESET_DEFAULT.fontSize as number))}
+                      min={12}
+                      max={30}
+                      onChange={(v) => updatePixivDraft({ fontSize: v })}
+                      suffix="px"
+                    />
+                    <LabeledSlider
+                      label="줄간격"
+                      value={Number((pixivDraftOverrides.lineHeight as number) ?? (PIXIV_PRESET_DEFAULT.lineHeight as number))}
+                      min={1.2}
+                      max={2.4}
+                      step={0.05}
+                      onChange={(v) => updatePixivDraft({ lineHeight: v })}
+                    />
+                    <LabeledSlider
+                      label="결과 여백"
+                      value={Number((pixivDraftOverrides.viewerPadding as number) ?? (PIXIV_PRESET_DEFAULT.viewerPadding as number))}
+                      min={8}
+                      max={42}
+                      onChange={(v) => updatePixivDraft({ viewerPadding: v })}
+                      suffix="px"
+                    />
+                    <LabeledSlider
+                      label="모서리 둥글기"
+                      value={Number((pixivDraftOverrides.viewerRadius as number) ?? (PIXIV_PRESET_DEFAULT.viewerRadius as number))}
+                      min={6}
+                      max={28}
+                      onChange={(v) => updatePixivDraft({ viewerRadius: v })}
+                      suffix="px"
+                    />
+
+                    {/* 배경 */}
+                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>배경(프리셋)</div>
+                    <LabeledSlider
+                      label="페이지 Hue"
+                      value={Number((pixivDraftOverrides.appBgH as number) ?? (PIXIV_PRESET_DEFAULT.appBgH as number))}
+                      min={0}
+                      max={360}
+                      onChange={(v) => updatePixivDraft({ appBgH: v })}
+                    />
+                    <LabeledSlider
+                      label="페이지 Sat"
+                      value={Number((pixivDraftOverrides.appBgS as number) ?? (PIXIV_PRESET_DEFAULT.appBgS as number))}
+                      min={0}
+                      max={100}
+                      onChange={(v) => updatePixivDraft({ appBgS: v })}
+                    />
+                    <LabeledSlider
+                      label="페이지 Light"
+                      value={Number((pixivDraftOverrides.appBgL as number) ?? (PIXIV_PRESET_DEFAULT.appBgL as number))}
+                      min={0}
+                      max={100}
+                      onChange={(v) => updatePixivDraft({ appBgL: v })}
+                    />
+
+                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
+                      ※ 카드 배경/글자색/패턴까지 Pixiv 프리셋에서 따로 만지고 싶으면, 같은 방식으로 슬라이더를 더 붙이면 돼.
+                      (지금은 핵심만 먼저 넣어둠)
+                    </div>
+                  </div>
+                </details>
               </div>
 
               {/* ✅ 서식 편집 */}
@@ -1421,11 +1661,7 @@ export default function Page() {
                         fontWeight: 800,
                       }}
                     >
-                      <option
-                        value={
-                          'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'
-                        }
-                      >
+                      <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
                         시스템(기본)
                       </option>
                       <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
@@ -1436,11 +1672,7 @@ export default function Page() {
                         산세리프(가독)
                       </option>
                       <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>세리프(소설 느낌)</option>
-                      <option
-                        value={
-                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
-                        }
-                      >
+                      <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
                         고정폭(모노)
                       </option>
                     </select>
@@ -1496,7 +1728,14 @@ export default function Page() {
                   >
                     <div style={{ fontWeight: 900, opacity: 0.85 }}>미리보기</div>
 
-                    <div style={{ marginTop: 8, border: "1px solid rgba(0,0,0,0.18)", borderRadius: 14, overflow: "hidden" }}>
+                    <div
+                      style={{
+                        marginTop: 8,
+                        border: "1px solid rgba(0,0,0,0.18)",
+                        borderRadius: 14,
+                        overflow: "hidden",
+                      }}
+                    >
                       <div
                         style={{
                           position: "relative",
@@ -1521,9 +1760,7 @@ export default function Page() {
                               style={{
                                 position: "absolute",
                                 inset: 0,
-                                background: `linear-gradient(0deg, rgba(0,0,0,${
-                                  draftSettings.bgPatternBlend * 0.06
-                                }) 0%, rgba(0,0,0,0) 70%)`,
+                                background: `linear-gradient(0deg, rgba(0,0,0,${draftSettings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
                               }}
                             />
                           </>
