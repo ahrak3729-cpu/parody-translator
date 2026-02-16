@@ -384,7 +384,7 @@ function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
   // "#1", "1話", "1화", "第1話", "제 1화"
-  let m =
+  const m =
     s.match(/^#\s*(\d{1,4})\b/) ||
     s.match(/^(?:第|제)?\s*(\d{1,4})\s*(?:話|화)\b/) ||
     s.match(/^(\d{1,4})\s*(?:話|화)\b/);
@@ -476,7 +476,17 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { cleanedText: cleaned, episodeNo, subtitle };
+  // ✅ 부제목을 추출했으면, 본문 맨 첫 줄에서만 1회 제거(중복 방지)
+  let finalCleaned = cleaned;
+  if (subtitle) {
+    const ls = finalCleaned.split("\n");
+    const first = (ls[0] || "").trim();
+    if (first && first.toLowerCase() === subtitle.trim().toLowerCase()) {
+      finalCleaned = ls.slice(1).join("\n").replace(/^\n+/, "");
+    }
+  }
+
+  return { cleanedText: finalCleaned, episodeNo, subtitle };
 }
 
 export default function Page() {
@@ -1047,31 +1057,28 @@ export default function Page() {
 
     // ✅ 작업용 변수
     let workingText = rawText;
-
-    // “현재 상태”를 기반으로 저장값은 유지하되,
-    // Pixiv 프리셋이 감지했을 때만 덮어쓴다.
     let nextEpisodeNo = episodeNo;
     let nextSubtitle = subtitle;
     let nextTranslatedSubtitle = translatedSubtitle;
 
-    // ✅ 감지 플래그 (이게 핵심: 기본값 때문에 헤더가 생기는 버그 차단)
-    let detectedEpisode = false;
-    let detectedSubtitle = false;
+    // ✅ "실제로 추출했는지" 플래그(기본값 1 때문에 헤더가 뜨는 문제 방지)
+    let extractedEpisode = false;
+    let extractedSubtitle = false;
 
     try {
-      // ✅ Pixiv 프리셋: 수동 번역(manual)에서만 적용 (URL은 건드리지 않음)
-      if (mode === "manual" && settings.pixivPresetEnabled) {
+      // ✅ Pixiv 프리셋: 수동 번역(읽기모드 복사)에서도 적용
+      if (settings.pixivPresetEnabled) {
         const r = applyPixivPreset(workingText, !!settings.pixivStripMeta);
         if (r.cleanedText.trim()) workingText = r.cleanedText;
 
         if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) {
-          detectedEpisode = true;
+          extractedEpisode = true;
           nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
           setEpisodeNo(nextEpisodeNo);
         }
 
         if (typeof r.subtitle === "string" && r.subtitle.trim()) {
-          detectedSubtitle = true;
+          extractedSubtitle = true;
           nextSubtitle = r.subtitle.trim();
           setSubtitle(nextSubtitle);
 
@@ -1085,9 +1092,13 @@ export default function Page() {
             nextTranslatedSubtitle = nextSubtitle;
             setTranslatedSubtitle(nextTranslatedSubtitle);
           }
+        } else {
+          // 부제목을 못 찾으면 헤더 부제목은 비움
+          nextSubtitle = "";
+          nextTranslatedSubtitle = "";
+          setSubtitle("");
+          setTranslatedSubtitle("");
         }
-        // ❗감지 실패 시: 절대 subtitle/translatedSubtitle을 강제로 비우지 않음
-        // (사용자가 수동으로 넣어둔 값이 있다면 그대로 유지)
       }
 
       const chunks = chunkText(workingText, 4500);
@@ -1106,16 +1117,12 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 헤더 표시 규칙 (가장 중요)
-      // - URL 모드: 현재 로직상 회차/부제목을 서버에서 추출하지 않으니 기본 false
-      // - manual + pixivPresetEnabled: "감지 성공"일 때만 true
-      const nextShowHeader =
-        mode === "manual" && settings.pixivPresetEnabled && (detectedEpisode || detectedSubtitle);
-
+      // ✅ 헤더는 “프리셋 ON + 실제로 회차/부제목을 뽑았을 때만”
+      const hasRealHeader = settings.pixivPresetEnabled && (extractedEpisode || extractedSubtitle);
+      const nextShowHeader = hasRealHeader;
       setShowHeader(nextShowHeader);
 
       autoSaveToHistory({
-        // ✅ 저장은 사용자가 붙여넣은 원문 그대로(원하면 workingText로 바꿔도 됨)
         sourceText: rawText.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
@@ -1595,9 +1602,7 @@ export default function Page() {
 
               {/* ✅ 프리셋 */}
               <details style={{ marginTop: 10 }}>
-                <summary style={{ cursor: "pointer", fontWeight: 900 }}>
-                  프리셋
-                </summary>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>프리셋</summary>
 
                 <div style={{ marginTop: 10 }}>
                   <label style={{ display: "flex", gap: 10, alignItems: "center", fontWeight: 900 }}>
@@ -1611,8 +1616,10 @@ export default function Page() {
                   </label>
 
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-                    ON이면 수동 번역에서도 회차/부제목을 추출하고, 결과 상단에 <b>제○화(큰 제목) + 번역된 부제목(작은 줄)</b>로 표시해.
-                    원문에 없는 “패러디소설” 같은 기본 문구는 절대 추가하지 않아.
+                    ON이면 수동 번역에서도 회차/부제목을 추출하고, 결과 상단에{" "}
+                    <b>제○화(큰 제목) + 번역된 부제목(작은 줄)</b>로 표시해.
+                    <br />
+                    ✅ 단, <b>실제로 추출 성공했을 때만</b> 헤더가 뜨고, 원문에 없는 문구는 절대 추가하지 않아.
                   </div>
 
                   <div style={{ height: 10 }} />
@@ -1661,19 +1668,31 @@ export default function Page() {
                       >
                         시스템(기본)
                       </option>
-                      <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                      <option
+                        value={
+                          '"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'
+                        }
+                      >
                         Noto Sans KR
                       </option>
                       <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>
                         Noto Serif KR / 명조
                       </option>
-                      <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
+                      <option
+                        value={
+                          'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'
+                        }
+                      >
                         산세리프(가독)
                       </option>
                       <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>
                         세리프(소설 느낌)
                       </option>
-                      <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
+                      <option
+                        value={
+                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+                        }
+                      >
                         고정폭(모노)
                       </option>
                     </select>
@@ -2012,10 +2031,10 @@ export default function Page() {
 
                 <button
                   onClick={() => {
-                      setHistoryOpen(false);
-                      setMenuOpen(false);
-                      setMenuAnchor(null);
-                      disableSelectMode();
+                    setHistoryOpen(false);
+                    setMenuOpen(false);
+                    setMenuAnchor(null);
+                    disableSelectMode();
                   }}
                   style={{
                     height: 36,
