@@ -1047,22 +1047,31 @@ export default function Page() {
 
     // ✅ 작업용 변수
     let workingText = rawText;
+
+    // “현재 상태”를 기반으로 저장값은 유지하되,
+    // Pixiv 프리셋이 감지했을 때만 덮어쓴다.
     let nextEpisodeNo = episodeNo;
     let nextSubtitle = subtitle;
     let nextTranslatedSubtitle = translatedSubtitle;
 
+    // ✅ 감지 플래그 (이게 핵심: 기본값 때문에 헤더가 생기는 버그 차단)
+    let detectedEpisode = false;
+    let detectedSubtitle = false;
+
     try {
-      // ✅ Pixiv 프리셋: 수동 번역(읽기모드 복사)에서도 적용
-      if (settings.pixivPresetEnabled) {
+      // ✅ Pixiv 프리셋: 수동 번역(manual)에서만 적용 (URL은 건드리지 않음)
+      if (mode === "manual" && settings.pixivPresetEnabled) {
         const r = applyPixivPreset(workingText, !!settings.pixivStripMeta);
         if (r.cleanedText.trim()) workingText = r.cleanedText;
 
         if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) {
+          detectedEpisode = true;
           nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
           setEpisodeNo(nextEpisodeNo);
         }
 
         if (typeof r.subtitle === "string" && r.subtitle.trim()) {
+          detectedSubtitle = true;
           nextSubtitle = r.subtitle.trim();
           setSubtitle(nextSubtitle);
 
@@ -1076,13 +1085,9 @@ export default function Page() {
             nextTranslatedSubtitle = nextSubtitle;
             setTranslatedSubtitle(nextTranslatedSubtitle);
           }
-        } else {
-          // 부제목을 못 찾으면 헤더 부제목은 비움
-          nextSubtitle = "";
-          nextTranslatedSubtitle = "";
-          setSubtitle("");
-          setTranslatedSubtitle("");
         }
+        // ❗감지 실패 시: 절대 subtitle/translatedSubtitle을 강제로 비우지 않음
+        // (사용자가 수동으로 넣어둔 값이 있다면 그대로 유지)
       }
 
       const chunks = chunkText(workingText, 4500);
@@ -1101,13 +1106,16 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 헤더는 “프리셋 ON + 회차/부제목을 실제로 뽑았을 때만”
-      const hasRealHeader =
-        settings.pixivPresetEnabled && (!!nextEpisodeNo || !!nextTranslatedSubtitle.trim());
-      const nextShowHeader = mode === "url" ? hasRealHeader : hasRealHeader;
-      setShowHeader(!!nextShowHeader);
+      // ✅ 헤더 표시 규칙 (가장 중요)
+      // - URL 모드: 현재 로직상 회차/부제목을 서버에서 추출하지 않으니 기본 false
+      // - manual + pixivPresetEnabled: "감지 성공"일 때만 true
+      const nextShowHeader =
+        mode === "manual" && settings.pixivPresetEnabled && (detectedEpisode || detectedSubtitle);
+
+      setShowHeader(nextShowHeader);
 
       autoSaveToHistory({
+        // ✅ 저장은 사용자가 붙여넣은 원문 그대로(원하면 workingText로 바꿔도 됨)
         sourceText: rawText.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
@@ -1115,7 +1123,7 @@ export default function Page() {
         episodeNo: nextEpisodeNo,
         subtitle: nextSubtitle,
         translatedSubtitle: nextTranslatedSubtitle,
-        showHeader: !!nextShowHeader,
+        showHeader: nextShowHeader,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -2004,10 +2012,10 @@ export default function Page() {
 
                 <button
                   onClick={() => {
-                    setHistoryOpen(false);
-                    setMenuOpen(false);
-                    setMenuAnchor(null);
-                    disableSelectMode();
+                      setHistoryOpen(false);
+                      setMenuOpen(false);
+                      setMenuAnchor(null);
+                      disableSelectMode();
                   }}
                   style={{
                     height: 36,
