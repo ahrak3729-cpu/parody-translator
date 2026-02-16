@@ -50,14 +50,26 @@ type Progress = { current: number; total: number } | null;
 type HistoryItem = {
   id: string;
   createdAt: number;
+
+  // ✅ “패러디소설” 같은 기본값 자동 주입 금지: 빈 문자열 허용
   seriesTitle: string;
+
   episodeNo: number;
+
+  // 원문 부제목/제목(저장용)
   subtitle: string;
+
+  // ✅ 번역된 부제목(표시용)
+  translatedSubtitle?: string;
+
   sourceText: string;
+
   translatedText: string; // 본문만 저장
   url?: string;
   folderId?: string | null;
-  showHeader?: boolean; // URL 번역이면 true, 수동이면 false(기본) — Pixiv 프리셋 ON이면 수동도 true
+
+  // 헤더 표시 여부
+  showHeader?: boolean;
 };
 
 type HistoryFolder = {
@@ -77,7 +89,7 @@ type AppSettings = {
   viewerPadding: number;
   viewerRadius: number;
 
-  // 폰트
+  // ✅ 폰트
   fontFamily: string;
 
   // 배경/색상 (HSL)
@@ -102,11 +114,9 @@ type AppSettings = {
   // Pixiv 쿠키
   pixivCookie: string;
 
-  // ✅ Pixiv 프리셋 ON/OFF (신규)
-  pixivPresetEnabled: boolean;
-
-  // ✅ Pixiv 메타 제거 강도 (신규 - 기본 true)
-  pixivStripMeta: boolean;
+  // ✅ 프리셋
+  pixivPresetEnabled: boolean; // Pixiv 복사용 텍스트 정리+헤더 적용
+  pixivStripMeta: boolean; // 날짜/시간/작가명 제거
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -116,7 +126,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   viewerPadding: 16,
   viewerRadius: 14,
 
-  // 기본 폰트(시스템)
+  // ✅ 기본 폰트(시스템)
   fontFamily:
     'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
 
@@ -140,13 +150,13 @@ const DEFAULT_SETTINGS: AppSettings = {
 
   pixivCookie: "",
 
-  // ✅ 신규 기본값
-  pixivPresetEnabled: false,
+  // ✅ 프리셋 기본값
+  pixivPresetEnabled: true,
   pixivStripMeta: true,
 };
 
-const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지 (충돌 방지)
-const SESSION_KEY = "parody_translator_session_v1"; // 현재 화면 상태 저장용(신규)
+const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지
+const SESSION_KEY = "parody_translator_session_v1"; // 현재 화면 상태 저장
 
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -164,7 +174,6 @@ function loadSettings(): AppSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    // ✅ 기존 데이터 + 신규 필드 안전 병합
     return { ...DEFAULT_SETTINGS, ...(parsed || {}) };
   } catch {
     return DEFAULT_SETTINGS;
@@ -271,7 +280,7 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
 }
 
 /* =========================
-   라벨 옆 슬라이더 (가로형)
+   ✅ 라벨 옆 슬라이더 (가로형)
 ========================= */
 function LabeledSlider(props: {
   label: string;
@@ -308,7 +317,7 @@ function LabeledSlider(props: {
 }
 
 /* =========================
-   세션(현재 화면) 저장/복원
+   ✅ 세션(현재 화면) 저장/복원
 ========================= */
 type AppSession = {
   url: string;
@@ -317,6 +326,7 @@ type AppSession = {
   seriesTitle: string;
   episodeNo: number;
   subtitle: string;
+  translatedSubtitle: string;
 
   source: string;
   resultBody: string;
@@ -340,169 +350,133 @@ function saveSession(s: AppSession) {
 }
 
 /* =========================
-   ✅ Pixiv 프리셋: 텍스트 전처리
-   - 회차 / 제목 감지
-   - 날짜/시간/작가명 제거
-   - 결과는 "제○화\n제목\n\n본문" 구조로 정리
+   ✅ Pixiv 프리셋: 읽기모드 복사 텍스트 정리
+   - 목표: 회차/부제목 추출 + 메타(날짜/시간/작가명) 제거
+   - 원문에 없는 “패러디소설” 같은 문구 절대 추가 금지
 ========================= */
-
-function normalizeNewlines(s: string) {
-  return (s || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+function normalizeText(t: string) {
+  return t.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ");
 }
 
-function isLikelyMetaLine(line: string) {
-  const l = line.trim();
-  if (!l) return true;
+function looksLikeDateTimeLine(line: string) {
+  const s = line.trim();
 
-  // 날짜/시간(한/일/영 혼합 대비)
-  const dateLike =
-    /\b(20\d{2})[./-]\d{1,2}[./-]\d{1,2}\b/.test(l) ||
-    /\b(20\d{2})\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일\b/.test(l) ||
-    /\b\d{1,2}\s*월\s*\d{1,2}\s*일\b/.test(l) ||
-    /\b\d{1,2}:\d{2}\b/.test(l);
+  // 2018년 12월 7일 오후 9:06 / 2025/02/01 13:20 등
+  if (/\b\d{4}[./-]\d{1,2}[./-]\d{1,2}\b/.test(s)) return true;
+  if (/\b\d{1,2}:\d{2}\b/.test(s) && /\b(AM|PM|오전|오후)\b/.test(s)) return true;
+  if (/\b\d{4}\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일\b/.test(s)) return true;
+  if (/^\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日/.test(s)) return true;
+  if (/^\d{1,2}:\d{2}$/.test(s)) return true;
+  return false;
+}
 
-  // Pixiv UI/통계/라벨
-  const pixivUi =
-    /(ブックマーク|いいね|閲覧|文字数|公開|非公開|シリーズ|作品|感想|フォロー|マイピク|投稿|更新)/.test(l) ||
-    /(조회|추천|좋아요|북마크|작가|작성자|게시|업로드|업뎃|업데이트|공개|비공개)/.test(l);
-
-  // 작가명 라인 추정
-  const authorLike =
-    /^(by\s+).+/i.test(l) ||
-    /(作者|作家|投稿者|ユーザー|user)/i.test(l) ||
-    /(작가|작성자|글쓴이)/.test(l);
-
-  // 너무 짧은 UI 라벨 단독
-  const shortJunk = l.length <= 2 && /[★☆♡♥]/.test(l);
-
-  return dateLike || pixivUi || authorLike || shortJunk;
+function looksLikeAuthorLine(line: string) {
+  const s = line.trim();
+  // “작가명”, “作者”, “by ...” 류를 완벽히 잡긴 어렵지만,
+  // Pixiv 복사 텍스트에서 자주 보이는 라인 패턴을 약하게 필터링
+  if (/^(作者|Author|by)\b/i.test(s)) return true;
+  if (/^(.+)\s*さん$/.test(s)) return true; // 일본어 “~さん”
+  if (/^\S+\s*\(.*\)$/.test(s) && s.length <= 40) return true; // 짧은 "이름(무언가)"
+  return false;
 }
 
 function parseEpisodeNo(line: string): number | null {
-  const l = line.trim();
+  const s = line.trim();
 
-  // "제 12화" / "제12화" / "12화" / "第12話"
-  const m1 = l.match(/^\s*제?\s*(\d{1,4})\s*화\s*$/);
-  if (m1) return Number(m1[1]);
+  // "#1", "1話", "1화", "第1話", "제 1화"
+  let m =
+    s.match(/^#\s*(\d{1,4})\b/) ||
+    s.match(/^(?:第|제)?\s*(\d{1,4})\s*(?:話|화)\b/) ||
+    s.match(/^(\d{1,4})\s*(?:話|화)\b/);
 
-  const m2 = l.match(/^\s*(\d{1,4})\s*화\s*$/);
-  if (m2) return Number(m2[1]);
-
-  const m3 = l.match(/^\s*第\s*(\d{1,4})\s*話\s*$/);
-  if (m3) return Number(m3[1]);
-
-  // "제 12화." 같은 변형
-  const m4 = l.match(/^\s*제?\s*(\d{1,4})\s*화[.)\s-]/);
-  if (m4) return Number(m4[1]);
-
-  const m5 = l.match(/^\s*第\s*(\d{1,4})\s*話[.)\s-]/);
-  if (m5) return Number(m5[1]);
-
+  if (m && m[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+  }
   return null;
 }
 
+function pickSubtitleFromLine(line: string): string | null {
+  // 예: "#1 전생에 악당이었던 남자 | 전생에 악당이었던 남자의 이야기 - 경원 자미"
+  // 예: "第1話 〇〇 / 〇〇"
+  const s = line.trim();
+  if (!s) return null;
+
+  // 너무 긴 문장은 제목으로 보기 어려움
+  if (s.length > 80) return null;
+
+  // 회차 같은 숫자/기호 제거 후 남은 텍스트에서 제목 후보 추출
+  let x = s
+    .replace(/^#\s*\d+\s*/, "")
+    .replace(/^(?:第|제)?\s*\d+\s*(?:話|화)\s*[:：.-]?\s*/, "")
+    .trim();
+
+  if (!x) return null;
+
+  // 구분자(|, /, -)가 있으면 첫 구간을 우선 부제목으로
+  const parts = x.split(/\s*(?:\||\/|／|—|–|-|―)\s*/g).filter(Boolean);
+
+  const cand = (parts[0] || "").trim();
+  if (!cand) return null;
+
+  // “소설의 구성은 …” 같은 문장형은 부제목에서 제외(마침표/종결기호 있으면 제외)
+  if (/[。.!?]$/.test(cand)) return null;
+
+  return cand;
+}
+
 type PixivPresetResult = {
-  cleanedText: string;
-  episodeNo: number | null;
-  subtitle: string | null;
+  cleanedText: string; // 번역에 넣을 본문(정리된 전체 텍스트)
+  episodeNo?: number;
+  subtitle?: string; // 원문 부제목
 };
 
-function applyPixivPreset(raw: string, stripMeta: boolean): PixivPresetResult {
-  const text = normalizeNewlines(raw);
-  if (!text) return { cleanedText: "", episodeNo: null, subtitle: null };
+function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
+  const text = normalizeText(rawText).trim();
+  if (!text) return { cleanedText: "" };
 
-  const lines = text.split("\n").map((x) => x.trimEnd());
-  const kept: string[] = [];
+  const lines = text.split("\n").map((l) => l.replace(/\s+$/g, ""));
+  const outLines: string[] = [];
 
-  // 1) 1차 메타 제거(옵션)
-  for (const line of lines) {
-    const t = line.trim();
-    if (!stripMeta) {
-      kept.push(line);
-      continue;
+  let episodeNo: number | undefined;
+  let subtitle: string | undefined;
+
+  // 상단 몇 줄에서 회차/부제목 후보를 우선 탐색
+  for (let i = 0; i < Math.min(lines.length, 8); i++) {
+    const ln = lines[i].trim();
+    if (!ln) continue;
+
+    if (episodeNo == null) {
+      const n = parseEpisodeNo(ln);
+      if (n != null) episodeNo = n;
     }
-    // 빈 줄은 살리되 과도하게 누적은 normalize에서 정리됨
-    if (!t) {
-      kept.push("");
-      continue;
-    }
-    // 메타로 보이면 제거
-    if (isLikelyMetaLine(t)) continue;
-    kept.push(line);
-  }
 
-  const compact = normalizeNewlines(kept.join("\n"));
-  const lines2 = compact.split("\n").map((x) => x.trim());
-  let ep: number | null = null;
-  let title: string | null = null;
-
-  // 2) 상단에서 회차/제목 탐색
-  //   - 회차는 상단 10줄 정도에서 우선 찾고
-  //   - 제목은 회차 다음의 첫 유의미 라인
-  const scanLimit = Math.min(lines2.length, 12);
-  let epIndex = -1;
-
-  for (let i = 0; i < scanLimit; i++) {
-    const cand = lines2[i]?.trim();
-    if (!cand) continue;
-    const n = parseEpisodeNo(cand);
-    if (n !== null) {
-      ep = n;
-      epIndex = i;
-      break;
+    if (!subtitle) {
+      const t = pickSubtitleFromLine(ln);
+      if (t) subtitle = t;
     }
   }
 
-  if (epIndex >= 0) {
-    for (let j = epIndex + 1; j < Math.min(lines2.length, epIndex + 6); j++) {
-      const cand = lines2[j]?.trim();
-      if (!cand) continue;
-      // 제목으로 보기 애매한 메타는 제외
-      if (stripMeta && isLikelyMetaLine(cand)) continue;
-      title = cand;
-      break;
+  // 메타 제거 + 정리
+  for (const l0 of lines) {
+    const l = l0.trimEnd();
+    const t = l.trim();
+
+    if (stripMeta) {
+      if (looksLikeDateTimeLine(t)) continue;
+      if (looksLikeAuthorLine(t)) continue;
     }
-  } else {
-    // 회차를 못 찾으면 "첫 유의미 라인"을 제목 후보로만 잡고 종료
-    for (let i = 0; i < scanLimit; i++) {
-      const cand = lines2[i]?.trim();
-      if (!cand) continue;
-      if (stripMeta && isLikelyMetaLine(cand)) continue;
-      title = cand;
-      break;
-    }
+
+    outLines.push(l);
   }
 
-  // 3) 본문 구성: (ep/title 부분을 제거하고) 남은 라인
-  let bodyLines = lines2.slice();
-  if (epIndex >= 0) {
-    // ep 라인 제거
-    bodyLines.splice(epIndex, 1);
-    // title 라인이 바로 뒤에 있었으면 제거(같은 텍스트 기준)
-    if (title) {
-      const idx = bodyLines.findIndex((x) => x.trim() === title);
-      if (idx >= 0 && idx < 6) bodyLines.splice(idx, 1);
-    }
-  } else {
-    // ep 없으면, title만 상단에 있으면 제거(최초 1개)
-    if (title) {
-      const idx = bodyLines.findIndex((x) => x.trim() === title);
-      if (idx >= 0 && idx < 4) bodyLines.splice(idx, 1);
-    }
-  }
+  // 너무 빈 줄이 많으면 정리
+  const cleaned = outLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
-  const body = normalizeNewlines(bodyLines.join("\n"));
-
-  // 4) 최종 텍스트: "제○화\n제목\n\n본문" (회차/제목이 있을 때만 포함)
-  const headerParts: string[] = [];
-  if (ep !== null) headerParts.push(`제 ${ep}화`);
-  if (title) headerParts.push(title);
-
-  const cleanedText = normalizeNewlines(
-    (headerParts.length ? headerParts.join("\n") + "\n\n" : "") + body
-  );
-
-  return { cleanedText, episodeNo: ep, subtitle: title };
+  return { cleanedText: cleaned, episodeNo, subtitle };
 }
 
 export default function Page() {
@@ -511,10 +485,15 @@ export default function Page() {
   ========================= */
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // "설정을 로드한 뒤에만 저장" 가드
+  // ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
   const settingsHydratedRef = useRef(false);
 
-  // 마운트 후 1회: localStorage에서 settings 로드
+  // 설정 모달(draft)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [settingsDirty, setSettingsDirty] = useState(false);
+
+  // ✅ 마운트 후 1회: localStorage에서 settings 로드
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -528,7 +507,7 @@ export default function Page() {
     settingsHydratedRef.current = true;
   }, []);
 
-  // settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
+  // ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!settingsHydratedRef.current) return;
@@ -538,17 +517,11 @@ export default function Page() {
     } catch {}
   }, [settings]);
 
-  // 설정 모달(draft)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
-  const [settingsDirty, setSettingsDirty] = useState(false);
-
   function openSettings() {
     setDraftSettings(settings);
     setSettingsDirty(false);
     setSettingsOpen(true);
   }
-
   function updateDraft(patch: Partial<AppSettings>) {
     setDraftSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -556,7 +529,6 @@ export default function Page() {
       return next;
     });
   }
-
   function saveDraft() {
     setSettings(draftSettings);
     try {
@@ -564,7 +536,6 @@ export default function Page() {
     } catch {}
     setSettingsDirty(false);
   }
-
   function undoDraft() {
     setDraftSettings(settings);
     setSettingsDirty(false);
@@ -584,9 +555,15 @@ export default function Page() {
   /* =========================
      메타
   ========================= */
-  const [seriesTitle, setSeriesTitle] = useState("패러디소설");
+  // ✅ 기본값 “패러디소설” 제거 (원문에 없는 문구 추가 금지)
+  const [seriesTitle, setSeriesTitle] = useState("");
   const [episodeNo, setEpisodeNo] = useState(1);
+
+  // 원문 부제목(저장용)
   const [subtitle, setSubtitle] = useState("");
+
+  // ✅ 번역된 부제목(표시용)
+  const [translatedSubtitle, setTranslatedSubtitle] = useState("");
 
   /* =========================
      원문 / 결과
@@ -635,13 +612,15 @@ export default function Page() {
   const PAGE_SIZE = 8;
   const [historyPage, setHistoryPage] = useState(1);
 
+  // ✅ 헤더는 “회차(큰 제목) + 번역된 부제목(작은 줄)”
   const headerPreview = useMemo(() => {
-    const title = (seriesTitle || "패러디소설").trim() || "패러디소설";
-    const epLine = subtitle.trim() ? `제 ${episodeNo}화 · ${subtitle.trim()}` : `제 ${episodeNo}화`;
-    return { title, epLine };
-  }, [seriesTitle, episodeNo, subtitle]);
+    const epLine = `제 ${episodeNo}화`;
+    const subLine = translatedSubtitle.trim();
+    return { epLine, subLine };
+  }, [episodeNo, translatedSubtitle]);
 
-  const percent = progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
+  const percent =
+    progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
 
   const currentIndex = useMemo(() => {
     if (!currentHistoryId) return -1;
@@ -693,7 +672,10 @@ export default function Page() {
     return filteredHistory.slice(start, start + PAGE_SIZE);
   }, [filteredHistory, historyPage]);
 
-  const selectedCount = useMemo(() => Object.values(selectedIds).filter(Boolean).length, [selectedIds]);
+  const selectedCount = useMemo(
+    () => Object.values(selectedIds).filter(Boolean).length,
+    [selectedIds]
+  );
 
   function persistHistory(next: HistoryItem[]) {
     setHistory(next);
@@ -716,7 +698,7 @@ export default function Page() {
   }
 
   /* =========================
-     새로고침 유지: 세션 복원
+     ✅ 새로고침 유지: 세션 복원
   ========================= */
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -726,9 +708,10 @@ export default function Page() {
     if (typeof s.url === "string") setUrl(s.url);
     if (typeof s.manualOpen === "boolean") setManualOpen(s.manualOpen);
 
-    if (typeof s.seriesTitle === "string") setSeriesTitle(s.seriesTitle || "패러디소설");
+    if (typeof s.seriesTitle === "string") setSeriesTitle(s.seriesTitle || "");
     if (typeof s.episodeNo === "number") setEpisodeNo(Math.max(1, Math.floor(s.episodeNo || 1)));
     if (typeof s.subtitle === "string") setSubtitle(s.subtitle || "");
+    if (typeof s.translatedSubtitle === "string") setTranslatedSubtitle(s.translatedSubtitle || "");
 
     if (typeof s.source === "string") setSource(s.source);
     if (typeof s.resultBody === "string") setResultBody(s.resultBody);
@@ -738,7 +721,7 @@ export default function Page() {
       setCurrentHistoryId(s.currentHistoryId ?? null);
   }, []);
 
-  // 세션 자동 저장
+  // ✅ 세션 자동 저장
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -748,6 +731,7 @@ export default function Page() {
         seriesTitle,
         episodeNo,
         subtitle,
+        translatedSubtitle,
         source,
         resultBody,
         showHeader,
@@ -755,7 +739,18 @@ export default function Page() {
       };
       saveSession(payload);
     } catch {}
-  }, [url, manualOpen, seriesTitle, episodeNo, subtitle, source, resultBody, showHeader, currentHistoryId]);
+  }, [
+    url,
+    manualOpen,
+    seriesTitle,
+    episodeNo,
+    subtitle,
+    translatedSubtitle,
+    source,
+    resultBody,
+    showHeader,
+    currentHistoryId,
+  ]);
 
   /* =========================
      폴더 재귀 유틸
@@ -774,7 +769,10 @@ export default function Page() {
     return result;
   }
 
-  function buildFolderTree(parentId: string | null, depth = 0): Array<{ f: HistoryFolder; depth: number }> {
+  function buildFolderTree(
+    parentId: string | null,
+    depth = 0
+  ): Array<{ f: HistoryFolder; depth: number }> {
     const children = folders
       .filter((x) => x.parentId === parentId)
       .sort((a, b) => a.name.localeCompare(b.name, "ko"));
@@ -856,7 +854,9 @@ export default function Page() {
     const f = folders.find((x) => x.id === selectedFolderId);
     if (!f) return;
 
-    const ok = confirm(`폴더 "${f.name}" 를 삭제할까요?\n하위 폴더/그 안의 항목도 함께 삭제됩니다.`);
+    const ok = confirm(
+      `폴더 "${f.name}" 를 삭제할까요?\n하위 폴더/그 안의 항목도 함께 삭제됩니다.`
+    );
     if (!ok) return;
 
     const idsToDelete = collectDescFolderIds(f.id);
@@ -918,7 +918,9 @@ export default function Page() {
     persistHistory(next);
 
     const nextFiltered =
-      selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
+      selectedFolderId === null
+        ? next
+        : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
@@ -927,6 +929,8 @@ export default function Page() {
       if (!next[0]) {
         setSource("");
         setResultBody("");
+        setTranslatedSubtitle("");
+        setSubtitle("");
       }
     }
 
@@ -934,9 +938,10 @@ export default function Page() {
   }
 
   function loadHistoryItem(it: HistoryItem) {
-    setSeriesTitle(it.seriesTitle);
+    setSeriesTitle(it.seriesTitle || "");
     setEpisodeNo(it.episodeNo);
     setSubtitle(it.subtitle || "");
+    setTranslatedSubtitle(it.translatedSubtitle || "");
     setSource(it.sourceText);
     setResultBody(it.translatedText || "");
     setShowHeader(!!it.showHeader);
@@ -993,14 +998,16 @@ export default function Page() {
     seriesTitle: string;
     episodeNo: number;
     subtitle: string;
+    translatedSubtitle: string;
     showHeader: boolean;
   }) {
     const item: HistoryItem = {
       id: uid(),
       createdAt: Date.now(),
-      seriesTitle: params.seriesTitle.trim() || "패러디소설",
+      seriesTitle: params.seriesTitle.trim() || "", // ✅ 자동 기본값 금지
       episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
       subtitle: params.subtitle.trim(),
+      translatedSubtitle: params.translatedSubtitle.trim(),
       sourceText: params.sourceText,
       translatedText: params.translatedBody,
       url: params.url?.trim() || undefined,
@@ -1019,14 +1026,13 @@ export default function Page() {
   }
 
   /* =========================
-     ✅ 번역 실행
-     - Pixiv 프리셋 ON이면 수동 번역도:
-       1) 텍스트 정리
-       2) episode/subtitle 자동 반영
-       3) 헤더 표시(showHeader=true)
-========================= */
-  async function runTranslation(text: string, opts?: { mode: "manual" | "url"; sourceUrl?: string }) {
-    if (!text.trim()) return;
+     번역 실행
+  ========================= */
+  async function runTranslation(
+    rawText: string,
+    opts?: { mode: "manual" | "url"; sourceUrl?: string }
+  ) {
+    if (!rawText.trim()) return;
 
     const mode = opts?.mode ?? "manual";
 
@@ -1039,25 +1045,49 @@ export default function Page() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    try {
-      let workingText = text.trim();
-      let nextEpisodeNo = episodeNo;
-      let nextSubtitle = subtitle;
+    // ✅ 작업용 변수
+    let workingText = rawText;
+    let nextEpisodeNo = episodeNo;
+    let nextSubtitle = subtitle;
+    let nextTranslatedSubtitle = translatedSubtitle;
 
-      const pixivPresetOn = !!settings.pixivPresetEnabled;
-      if (pixivPresetOn) {
+    try {
+      // ✅ Pixiv 프리셋: 수동 번역(읽기모드 복사)에서도 적용
+      if (settings.pixivPresetEnabled) {
         const r = applyPixivPreset(workingText, !!settings.pixivStripMeta);
         if (r.cleanedText.trim()) workingText = r.cleanedText;
-        if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) nextEpisodeNo = r.episodeNo;
-        if (typeof r.subtitle === "string" && r.subtitle.trim()) nextSubtitle = r.subtitle.trim();
 
-        // ✅ 프리셋이 추출해준 메타를 화면 값에 반영 (사용자 편하게)
-        setEpisodeNo(nextEpisodeNo);
-        setSubtitle(nextSubtitle);
+        if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) {
+          nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
+          setEpisodeNo(nextEpisodeNo);
+        }
+
+        if (typeof r.subtitle === "string" && r.subtitle.trim()) {
+          nextSubtitle = r.subtitle.trim();
+          setSubtitle(nextSubtitle);
+
+          // ✅ 부제목도 번역해서 표시용으로 저장
+          try {
+            const subKo = await translateChunk(nextSubtitle, controller.signal);
+            nextTranslatedSubtitle = subKo.trim();
+            setTranslatedSubtitle(nextTranslatedSubtitle);
+          } catch {
+            // 부제목 번역 실패해도 본문 번역은 진행
+            nextTranslatedSubtitle = nextSubtitle;
+            setTranslatedSubtitle(nextTranslatedSubtitle);
+          }
+        } else {
+          // 부제목을 못 찾으면 헤더 부제목은 비움
+          nextSubtitle = "";
+          nextTranslatedSubtitle = "";
+          setSubtitle("");
+          setTranslatedSubtitle("");
+        }
       }
 
       const chunks = chunkText(workingText, 4500);
-      if (chunks.length > 80) throw new Error(`너무 길어서 자동 처리 부담이 큽니다. (분할 ${chunks.length}조각)`);
+      if (chunks.length > 80)
+        throw new Error(`너무 길어서 자동 처리 부담이 큽니다. (분할 ${chunks.length}조각)`);
 
       setProgress({ current: 0, total: chunks.length });
 
@@ -1071,20 +1101,21 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 헤더 표시 규칙:
-      // - URL 모드: 항상 true
-      // - 수동 모드: Pixiv 프리셋 ON이면 true, 아니면 false(기존과 동일)
-      const nextShowHeader = mode === "url" ? true : !!settings.pixivPresetEnabled;
-      setShowHeader(nextShowHeader);
+      // ✅ 헤더는 “프리셋 ON + 회차/부제목을 실제로 뽑았을 때만”
+      const hasRealHeader =
+        settings.pixivPresetEnabled && (!!nextEpisodeNo || !!nextTranslatedSubtitle.trim());
+      const nextShowHeader = mode === "url" ? hasRealHeader : hasRealHeader;
+      setShowHeader(!!nextShowHeader);
 
       autoSaveToHistory({
-        sourceText: workingText,
+        sourceText: rawText.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
-        seriesTitle: (seriesTitle || "패러디소설").trim() || "패러디소설",
+        seriesTitle: seriesTitle.trim() || "", // ✅ 자동 기본값 금지
         episodeNo: nextEpisodeNo,
         subtitle: nextSubtitle,
-        showHeader: nextShowHeader,
+        translatedSubtitle: nextTranslatedSubtitle,
+        showHeader: !!nextShowHeader,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -1097,7 +1128,7 @@ export default function Page() {
 
   /* =========================
      URL → 본문 불러오기
-========================= */
+  ========================= */
   async function fetchFromUrl() {
     const u = url.trim();
     if (!u) return;
@@ -1124,28 +1155,23 @@ export default function Page() {
 
       if (data?.__notJson) {
         throw new Error(
-          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(텍스트 직접 붙여넣기로 우회 가능)"
+          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(다른 사이트로 테스트하거나, 텍스트 직접 붙여넣기로 확인해줘)"
         );
       }
 
+      // title은 사이트 메타일 수 있어서, 자동으로 “헤더”에 쓰지 않음.
+      // 필요하면 seriesTitle에만 반영(표시 여부는 별도).
       if (data?.title) setSeriesTitle(String(data.title));
+
       const text = String(data?.text ?? "");
       if (!text.trim()) {
-        throw new Error("본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)");
+        throw new Error(
+          "본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘."
+        );
       }
 
       setSource(text);
-
-      // URL 모드도 Pixiv 프리셋 ON이면 정리해서 번역
-      let workingText = text;
-      if (settings.pixivPresetEnabled) {
-        const r = applyPixivPreset(text, !!settings.pixivStripMeta);
-        if (r.cleanedText.trim()) workingText = r.cleanedText;
-        if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) setEpisodeNo(r.episodeNo);
-        if (typeof r.subtitle === "string" && r.subtitle.trim()) setSubtitle(r.subtitle.trim());
-      }
-
-      await runTranslation(workingText, { mode: "url", sourceUrl: u });
+      await runTranslation(text, { mode: "url", sourceUrl: u });
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
     } finally {
@@ -1155,7 +1181,7 @@ export default function Page() {
 
   /* =========================
      + 메뉴 앵커 계산 (모달 잘림 방지)
-========================= */
+  ========================= */
   function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
     const right = Math.max(12, window.innerWidth - rect.right);
@@ -1166,12 +1192,12 @@ export default function Page() {
 
   /* =========================
      현재 설정 기반 배경 스타일
-========================= */
+  ========================= */
   const appBg = hsl(settings.appBgH, settings.appBgS, settings.appBgL);
   const cardBg = hsl(settings.cardBgH, settings.cardBgS, settings.cardBgL);
   const textColor = hsl(settings.textH, settings.textS, settings.textL);
 
-  // 공통 카드: “카드 1겹” 규칙
+  // ✅ 공통 카드: “카드 1겹” 규칙
   const cardShellStyle: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.18)",
     borderRadius: settings.viewerRadius,
@@ -1179,7 +1205,7 @@ export default function Page() {
     padding: 14,
   };
 
-  // 카드 안 입력요소: 무테/무배경
+  // ✅ 카드 안에 들어가는 입력요소: 테두리/배경 없음(레이아웃 고정)
   const innerInputBase: React.CSSProperties = {
     width: "100%",
     border: "none",
@@ -1200,7 +1226,7 @@ export default function Page() {
         fontFamily: settings.fontFamily,
       }}
     >
-      {/* 페이지 전체 배경 패턴 (있을 때만) */}
+      {/* ✅ 페이지 전체 배경 패턴 (있을 때만) */}
       {!!settings.bgPatternUrl.trim() && (
         <>
           <div
@@ -1220,13 +1246,23 @@ export default function Page() {
               pointerEvents: "none",
               position: "fixed",
               inset: 0,
-              background: `linear-gradient(0deg, rgba(0,0,0,${settings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
+              background: `linear-gradient(0deg, rgba(0,0,0,${
+                settings.bgPatternBlend * 0.06
+              }) 0%, rgba(0,0,0,0) 70%)`,
             }}
           />
         </>
       )}
 
-      <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86, position: "relative" }}>
+      <main
+        style={{
+          maxWidth: 860,
+          margin: "0 auto",
+          padding: 24,
+          paddingBottom: 86,
+          position: "relative",
+        }}
+      >
         {/* 상단바 */}
         <div
           style={{
@@ -1238,11 +1274,15 @@ export default function Page() {
           }}
         >
           <div>
-            <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0, color: textColor }}>Parody Translator</h1>
-            <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임</div>
+            <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0, color: textColor }}>
+              Parody Translator
+            </h1>
+            <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>
+              자동 저장: ☰ 목록에 시간순으로 쌓임
+            </div>
           </div>
 
-          {/* 히스토리 + 설정(아이콘) */}
+          {/* ✅ 히스토리 + 설정(아이콘) */}
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               onClick={() => {
@@ -1289,7 +1329,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* URL 입력 */}
+        {/* ✅ URL 입력 (카드 1겹 + input 무테/무배경) */}
         <div style={{ ...cardShellStyle, marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <input
@@ -1329,8 +1369,11 @@ export default function Page() {
           onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
           style={{ marginBottom: 12 }}
         >
-          <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
+          <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>
+            텍스트 직접 번역
+          </summary>
 
+          {/* ✅ 직접 번역 카드 1겹 */}
           <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
@@ -1388,15 +1431,19 @@ export default function Page() {
               )}
             </div>
 
-            {/* ✅ Pixiv 프리셋 상태 표시(간단) */}
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+            {/* ✅ 프리셋 상태 표시(가볍게) */}
+            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
               Pixiv 프리셋: <b>{settings.pixivPresetEnabled ? "ON" : "OFF"}</b>
               {settings.pixivPresetEnabled ? " · 수동 번역에도 회차/부제목 정리 + 헤더 적용" : ""}
             </div>
           </div>
         </details>
 
-        {error && <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>{error}</div>}
+        {error && (
+          <div style={{ color: "#c00", marginTop: 8, fontWeight: 700, whiteSpace: "pre-wrap" }}>
+            {error}
+          </div>
+        )}
 
         {/* 결과 Viewer */}
         <div style={{ marginTop: 14 }}>
@@ -1422,8 +1469,17 @@ export default function Page() {
               <>
                 {showHeader && (
                   <>
-                    <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>{headerPreview.title}</div>
-                    <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>{headerPreview.epLine}</div>
+                    {/* ✅ 큰 제목: 회차만 */}
+                    <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
+                      {headerPreview.epLine}
+                    </div>
+
+                    {/* ✅ 작은 줄: 번역된 부제목만 (없으면 표시 X) */}
+                    {headerPreview.subLine && (
+                      <div style={{ fontSize: 14, opacity: 0.7, marginBottom: 28 }}>
+                        {headerPreview.subLine}
+                      </div>
+                    )}
                   </>
                 )}
                 <div>{resultBody}</div>
@@ -1463,7 +1519,15 @@ export default function Page() {
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  marginBottom: 10,
+                }}
+              >
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 900 }}>설정</div>
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
@@ -1522,51 +1586,52 @@ export default function Page() {
               </div>
 
               {/* ✅ 프리셋 */}
-              <details open style={{ marginTop: 10 }}>
-                <summary style={{ cursor: "pointer", fontWeight: 900 }}>프리셋</summary>
+              <details style={{ marginTop: 10 }}>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>
+                  프리셋
+                </summary>
 
-                <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                  <div style={{ fontWeight: 900, opacity: 0.85 }}>Pixiv 소설 프리셋</div>
-                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, whiteSpace: "pre-wrap" }}>
-                    - 수동/URL 모두 적용 가능
-                    {"\n"}- 회차/부제목/본문 정리: <b>회차 → 부제목 → 본문</b>
-                    {"\n"}- 날짜/시간/작가명 같은 메타 제거(옵션)
+                <div style={{ marginTop: 10 }}>
+                  <label style={{ display: "flex", gap: 10, alignItems: "center", fontWeight: 900 }}>
+                    <input
+                      type="checkbox"
+                      checked={draftSettings.pixivPresetEnabled}
+                      onChange={(e) => updateDraft({ pixivPresetEnabled: e.target.checked })}
+                      style={{ width: 18, height: 18 }}
+                    />
+                    Pixiv 소설(읽기모드 복사) 정리 + 헤더 적용
+                  </label>
+
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                    ON이면 수동 번역에서도 회차/부제목을 추출하고, 결과 상단에 <b>제○화(큰 제목) + 번역된 부제목(작은 줄)</b>로 표시해.
+                    원문에 없는 “패러디소설” 같은 기본 문구는 절대 추가하지 않아.
                   </div>
 
-                  <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-                    <button
-                      onClick={() => updateDraft({ pixivPresetEnabled: !draftSettings.pixivPresetEnabled })}
-                      style={{
-                        height: 38,
-                        padding: "0 12px",
-                        borderRadius: 10,
-                        border: "1px solid rgba(0,0,0,0.18)",
-                        cursor: "pointer",
-                        fontWeight: 900,
-                        background: draftSettings.pixivPresetEnabled ? "#111" : "#fff",
-                        color: draftSettings.pixivPresetEnabled ? "#fff" : "#111",
-                      }}
-                    >
-                      {draftSettings.pixivPresetEnabled ? "ON" : "OFF"}
-                    </button>
+                  <div style={{ height: 10 }} />
 
-                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 900, opacity: 0.85 }}>
-                      <input
-                        type="checkbox"
-                        checked={!!draftSettings.pixivStripMeta}
-                        onChange={(e) => updateDraft({ pixivStripMeta: e.target.checked })}
-                      />
-                      메타(날짜/시간/작가명) 제거
-                    </label>
+                  <label style={{ display: "flex", gap: 10, alignItems: "center", fontWeight: 900 }}>
+                    <input
+                      type="checkbox"
+                      checked={draftSettings.pixivStripMeta}
+                      onChange={(e) => updateDraft({ pixivStripMeta: e.target.checked })}
+                      style={{ width: 18, height: 18 }}
+                      disabled={!draftSettings.pixivPresetEnabled}
+                    />
+                    날짜/시간/작가명 라인 제거
+                  </label>
+
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                    (권장) 읽기모드로 복사하면 상단에 날짜/시간이 붙는 경우가 많아서, 이 옵션이 있으면 더 깔끔해져.
                   </div>
                 </div>
               </details>
 
               {/* ✅ 서식 편집 */}
-              <details style={{ marginTop: 14 }}>
+              <details open style={{ marginTop: 14 }}>
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
+                  {/* ✅ 폰트 선택 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 6 }}>폰트</div>
                   <div style={{ marginTop: 8 }}>
                     <select
@@ -1581,23 +1646,32 @@ export default function Page() {
                         fontWeight: 800,
                       }}
                     >
-                      <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                      <option
+                        value={
+                          'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'
+                        }
+                      >
                         시스템(기본)
                       </option>
                       <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
                         Noto Sans KR
                       </option>
-                      <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>Noto Serif KR / 명조</option>
+                      <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>
+                        Noto Serif KR / 명조
+                      </option>
                       <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
                         산세리프(가독)
                       </option>
-                      <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>세리프(소설 느낌)</option>
+                      <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>
+                        세리프(소설 느낌)
+                      </option>
                       <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
                         고정폭(모노)
                       </option>
                     </select>
                   </div>
 
+                  {/* ✅ 미리보기 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>미리보기</div>
                   <div
                     style={{
@@ -1612,8 +1686,8 @@ export default function Page() {
                       fontFamily: draftSettings.fontFamily,
                     }}
                   >
-                    <div style={{ fontWeight: 900, fontSize: 22 }}>미리보기 제목</div>
-                    <div style={{ opacity: 0.72, marginTop: 6 }}>제 1화 · 부제목</div>
+                    <div style={{ fontWeight: 900, fontSize: 22 }}>제 1화</div>
+                    <div style={{ opacity: 0.72, marginTop: 6 }}>번역된 부제목(있을 때만 표시)</div>
                     <div style={{ marginTop: 14, whiteSpace: "pre-wrap" }}>
                       비는 새벽부터 계속 내리고 있었다.
                       {"\n\n"}
@@ -1621,10 +1695,38 @@ export default function Page() {
                     </div>
                   </div>
 
-                  <LabeledSlider label="글자 크기" value={draftSettings.fontSize} min={12} max={30} onChange={(v) => updateDraft({ fontSize: v })} suffix="px" />
-                  <LabeledSlider label="줄간격" value={draftSettings.lineHeight} min={1.2} max={2.4} step={0.05} onChange={(v) => updateDraft({ lineHeight: v })} />
-                  <LabeledSlider label="결과 여백" value={draftSettings.viewerPadding} min={8} max={42} onChange={(v) => updateDraft({ viewerPadding: v })} suffix="px" />
-                  <LabeledSlider label="모서리 둥글기" value={draftSettings.viewerRadius} min={6} max={28} onChange={(v) => updateDraft({ viewerRadius: v })} suffix="px" />
+                  <LabeledSlider
+                    label="글자 크기"
+                    value={draftSettings.fontSize}
+                    min={12}
+                    max={30}
+                    onChange={(v) => updateDraft({ fontSize: v })}
+                    suffix="px"
+                  />
+                  <LabeledSlider
+                    label="줄간격"
+                    value={draftSettings.lineHeight}
+                    min={1.2}
+                    max={2.4}
+                    step={0.05}
+                    onChange={(v) => updateDraft({ lineHeight: v })}
+                  />
+                  <LabeledSlider
+                    label="결과 여백"
+                    value={draftSettings.viewerPadding}
+                    min={8}
+                    max={42}
+                    onChange={(v) => updateDraft({ viewerPadding: v })}
+                    suffix="px"
+                  />
+                  <LabeledSlider
+                    label="모서리 둥글기"
+                    value={draftSettings.viewerRadius}
+                    min={6}
+                    max={28}
+                    onChange={(v) => updateDraft({ viewerRadius: v })}
+                    suffix="px"
+                  />
                 </div>
               </details>
 
@@ -1633,6 +1735,7 @@ export default function Page() {
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>배경 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
+                  {/* ✅ 배경 미리보기: sticky */}
                   <div
                     style={{
                       position: "sticky",
@@ -1678,7 +1781,9 @@ export default function Page() {
                               style={{
                                 position: "absolute",
                                 inset: 0,
-                                background: `linear-gradient(0deg, rgba(0,0,0,${draftSettings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
+                                background: `linear-gradient(0deg, rgba(0,0,0,${
+                                  draftSettings.bgPatternBlend * 0.06
+                                }) 0%, rgba(0,0,0,0) 70%)`,
                               }}
                             />
                           </>
@@ -1699,28 +1804,34 @@ export default function Page() {
                             }}
                           >
                             <div style={{ fontWeight: 900 }}>배경 미리보기</div>
-                            <div style={{ marginTop: 8, opacity: 0.8 }}>페이지 배경 + 패턴 + 카드 배경이 이렇게 보일 거야.</div>
+                            <div style={{ marginTop: 8, opacity: 0.8 }}>
+                              페이지 배경 + 패턴 + 카드 배경이 이렇게 보일 거야.
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
                   </div>
 
+                  {/* 페이지 배경 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 4 }}>페이지 배경 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.appBgH} min={0} max={360} onChange={(v) => updateDraft({ appBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.appBgS} min={0} max={100} onChange={(v) => updateDraft({ appBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.appBgL} min={0} max={100} onChange={(v) => updateDraft({ appBgL: v })} />
 
+                  {/* 카드 배경 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>결과 카드 배경 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.cardBgH} min={0} max={360} onChange={(v) => updateDraft({ cardBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.cardBgS} min={0} max={100} onChange={(v) => updateDraft({ cardBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.cardBgL} min={0} max={100} onChange={(v) => updateDraft({ cardBgL: v })} />
 
+                  {/* 글자 색 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>글자 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.textH} min={0} max={360} onChange={(v) => updateDraft({ textH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.textS} min={0} max={100} onChange={(v) => updateDraft({ textS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.textL} min={0} max={100} onChange={(v) => updateDraft({ textL: v })} />
 
+                  {/* 패턴 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>빈티지 배경 무늬(선택)</div>
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
                     오래된 종이 같은 무늬를 쓰고 싶으면 패턴 이미지 URL을 넣어줘. (없으면 비워두면 됨)
@@ -1755,7 +1866,7 @@ export default function Page() {
                 </div>
               </details>
 
-              {/* Pixiv 쿠키 */}
+              {/* ✅ Pixiv 쿠키 등록 */}
               <details style={{ marginTop: 14 }}>
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>Pixiv 쿠키</summary>
 
@@ -1767,7 +1878,7 @@ export default function Page() {
                   <textarea
                     value={draftSettings.pixivCookie}
                     onChange={(e) => updateDraft({ pixivCookie: e.target.value })}
-                    placeholder='예) PHPSESSID=...; device_token=...; p_ab_id_2=...;'
+                    placeholder="예) PHPSESSID=...; device_token=...; ..."
                     style={{
                       width: "100%",
                       minHeight: 90,
@@ -1841,10 +1952,19 @@ export default function Page() {
               onClick={(e) => e.stopPropagation()}
             >
               {/* 헤더 */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  marginBottom: 10,
+                }}
+              >
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 900 }}>목록</div>
 
+                  {/* 상태줄 */}
                   <div
                     style={{
                       fontSize: 12,
@@ -1903,7 +2023,7 @@ export default function Page() {
                 </button>
               </div>
 
-              {/* 상단: 전체/뒤로 */}
+              {/* 상단: 전체/뒤로(아이콘만) */}
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
                 <button
                   onClick={() => {
@@ -1981,7 +2101,7 @@ export default function Page() {
                 <>
                   <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
                     {pagedHistory.map((it) => {
-                      const label = `${it.seriesTitle} · ${it.episodeNo}화`;
+                      const label = `${it.episodeNo}화`;
                       const checked = !!selectedIds[it.id];
 
                       return (
@@ -2024,7 +2144,10 @@ export default function Page() {
                             }}
                             title={selectMode ? "선택/해제" : "불러오기"}
                           >
-                            <div style={{ fontWeight: 900 }}>{label}</div>
+                            <div style={{ fontWeight: 900 }}>
+                              {label}
+                              {it.translatedSubtitle ? ` · ${it.translatedSubtitle}` : it.subtitle ? ` · ${it.subtitle}` : ""}
+                            </div>
                             <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
                               {formatDate(it.createdAt)}
                               {it.url ? ` · URL 저장됨` : ""}
@@ -2093,7 +2216,7 @@ export default function Page() {
                 </>
               )}
 
-              {/* 하단 오른쪽: 선택모드일 때만 이동/삭제 */}
+              {/* 하단 오른쪽: 선택모드일 때만 이동/삭제 버튼이 + 왼쪽에 등장 */}
               <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
                 {selectMode && (
                   <>
@@ -2165,7 +2288,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* + 메뉴 팝업 */}
+        {/* + 메뉴 팝업 (fixed 레이어) */}
         {historyOpen && menuOpen && menuAnchor && (
           <div
             style={{ position: "fixed", inset: 0, zIndex: 10001 }}
@@ -2252,11 +2375,20 @@ export default function Page() {
               }}
               onClick={(e) => e.stopPropagation()}
             >
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  marginBottom: 10,
+                }}
+              >
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 900 }}>어느 폴더로 옮길까?</div>
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                    선택된 항목: <b>{selectedCount}개</b> · 대상 폴더: <b>{folderNameById(moveTargetFolderId)}</b>
+                    선택된 항목: <b>{selectedCount}개</b> · 대상 폴더:{" "}
+                    <b>{folderNameById(moveTargetFolderId)}</b>
                   </div>
                 </div>
 
@@ -2284,7 +2416,10 @@ export default function Page() {
                     textAlign: "left",
                     padding: "10px 10px",
                     borderRadius: 10,
-                    border: moveTargetFolderId === null ? "2px solid #111" : "1px solid rgba(0,0,0,0.18)",
+                    border:
+                      moveTargetFolderId === null
+                        ? "2px solid #111"
+                        : "1px solid rgba(0,0,0,0.18)",
                     background: "#fff",
                     cursor: "pointer",
                     fontWeight: 900,
@@ -2358,7 +2493,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* Bottom Nav */}
+        {/* Bottom Nav: 이전/복사/다음 */}
         <div
           style={{
             position: "fixed",
@@ -2371,7 +2506,16 @@ export default function Page() {
             zIndex: 9998,
           }}
         >
-          <div style={{ maxWidth: 860, margin: "0 auto", display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between" }}>
+          <div
+            style={{
+              maxWidth: 860,
+              margin: "0 auto",
+              display: "flex",
+              gap: 10,
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
             <button
               onClick={goPrev}
               disabled={!canPrev}
@@ -2427,4 +2571,4 @@ export default function Page() {
       </main>
     </div>
   );
-            }
+}
