@@ -54,7 +54,8 @@ type HistoryItem = {
   // ✅ “패러디소설” 같은 기본값 자동 주입 금지: 빈 문자열 허용
   seriesTitle: string;
 
-  episodeNo: number;
+  // ✅ 회차가 원문에 없으면 null (임의로 1화 생성 금지)
+  episodeNo: number | null;
 
   // 원문 부제목/제목(저장용)
   subtitle: string;
@@ -196,7 +197,32 @@ function loadHistory(): HistoryItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x) => x && typeof x === "object" && typeof x.id === "string");
+
+    // ✅ 구버전 호환: episodeNo가 number만 있던 시절 데이터 -> 그대로 살리되, 없으면 null
+    return parsed
+      .filter((x) => x && typeof x === "object" && typeof x.id === "string")
+      .map((x) => {
+        const ep =
+          typeof (x as any).episodeNo === "number" && Number.isFinite((x as any).episodeNo)
+            ? Math.max(1, Math.floor((x as any).episodeNo))
+            : null;
+
+        const item: HistoryItem = {
+          id: String((x as any).id),
+          createdAt: Number((x as any).createdAt) || Date.now(),
+          seriesTitle: typeof (x as any).seriesTitle === "string" ? (x as any).seriesTitle : "",
+          episodeNo: ep,
+          subtitle: typeof (x as any).subtitle === "string" ? (x as any).subtitle : "",
+          translatedSubtitle:
+            typeof (x as any).translatedSubtitle === "string" ? (x as any).translatedSubtitle : undefined,
+          sourceText: typeof (x as any).sourceText === "string" ? (x as any).sourceText : "",
+          translatedText: typeof (x as any).translatedText === "string" ? (x as any).translatedText : "",
+          url: typeof (x as any).url === "string" ? (x as any).url : undefined,
+          folderId: typeof (x as any).folderId === "string" ? (x as any).folderId : (x as any).folderId ?? null,
+          showHeader: typeof (x as any).showHeader === "boolean" ? (x as any).showHeader : false,
+        };
+        return item;
+      });
   } catch {
     return [];
   }
@@ -324,7 +350,7 @@ type AppSession = {
   manualOpen: boolean;
 
   seriesTitle: string;
-  episodeNo: number;
+  episodeNo: number | null;
   subtitle: string;
   translatedSubtitle: string;
 
@@ -353,6 +379,8 @@ function saveSession(s: AppSession) {
    ✅ Pixiv 프리셋: 읽기모드 복사 텍스트 정리
    - 목표: 회차/부제목 추출 + 메타(날짜/시간/작가명) 제거
    - 원문에 없는 “패러디소설” 같은 문구 절대 추가 금지
+   - ✅ Side / Side Fate / Side out 은 '부제목 후보에서 제외'
+   - ✅ 회차도 원문에 명시된 경우에만 생성 (임의로 1화 생성 금지)
 ========================= */
 function normalizeText(t: string) {
   return t.replace(/\r\n/g, "\n").replace(/\u00a0/g, " ");
@@ -372,12 +400,15 @@ function looksLikeDateTimeLine(line: string) {
 
 function looksLikeAuthorLine(line: string) {
   const s = line.trim();
-  // “작가명”, “作者”, “by ...” 류를 완벽히 잡긴 어렵지만,
-  // Pixiv 복사 텍스트에서 자주 보이는 라인 패턴을 약하게 필터링
   if (/^(作者|Author|by)\b/i.test(s)) return true;
   if (/^(.+)\s*さん$/.test(s)) return true; // 일본어 “~さん”
   if (/^\S+\s*\(.*\)$/.test(s) && s.length <= 40) return true; // 짧은 "이름(무언가)"
   return false;
+}
+
+// ✅ Side 계열(부제목 후보 제외)
+function isSideLabel(s: string) {
+  return /^side(\s+(fate|out))?$/i.test(s.trim());
 }
 
 function parseEpisodeNo(line: string): number | null {
@@ -397,36 +428,36 @@ function parseEpisodeNo(line: string): number | null {
 }
 
 function pickSubtitleFromLine(line: string): string | null {
-  // 예: "#1 전생에 악당이었던 남자 | 전생에 악당이었던 남자의 이야기 - 경원 자미"
-  // 예: "第1話 〇〇 / 〇〇"
-  const s = line.trim();
-  if (!s) return null;
+  const raw = line.trim();
+  if (!raw) return null;
 
   // 너무 긴 문장은 제목으로 보기 어려움
-  if (s.length > 80) return null;
+  if (raw.length > 80) return null;
 
   // 회차 같은 숫자/기호 제거 후 남은 텍스트에서 제목 후보 추출
-  let x = s
+  const cleaned = raw
     .replace(/^#\s*\d+\s*/, "")
     .replace(/^(?:第|제)?\s*\d+\s*(?:話|화)\s*[:：.-]?\s*/, "")
     .trim();
 
-  if (!x) return null;
+  if (!cleaned) return null;
 
   // 구분자(|, /, -)가 있으면 첫 구간을 우선 부제목으로
-  const parts = x.split(/\s*(?:\||\/|／|—|–|-|―)\s*/g).filter(Boolean);
-
+  const parts = cleaned.split(/\s*(?:\||\/|／|—|–|-|―)\s*/g).filter(Boolean);
   const cand = (parts[0] || "").trim();
   if (!cand) return null;
 
-  // “소설의 구성은 …” 같은 문장형은 부제목에서 제외(마침표/종결기호 있으면 제외)
+  // ✅ Side 계열은 부제목 후보에서 제외
+  if (isSideLabel(cand)) return null;
+
+  // 문장형은 제외
   if (/[。.!?]$/.test(cand)) return null;
 
   return cand;
 }
 
 type PixivPresetResult = {
-  cleanedText: string; // 번역에 넣을 본문(정리된 전체 텍스트)
+  cleanedText: string;
   episodeNo?: number;
   subtitle?: string; // 원문 부제목
 };
@@ -470,23 +501,12 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     outLines.push(l);
   }
 
-  // 너무 빈 줄이 많으면 정리
   const cleaned = outLines
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  // ✅ 부제목을 추출했으면, 본문 맨 첫 줄에서만 1회 제거(중복 방지)
-  let finalCleaned = cleaned;
-  if (subtitle) {
-    const ls = finalCleaned.split("\n");
-    const first = (ls[0] || "").trim();
-    if (first && first.toLowerCase() === subtitle.trim().toLowerCase()) {
-      finalCleaned = ls.slice(1).join("\n").replace(/^\n+/, "");
-    }
-  }
-
-  return { cleanedText: finalCleaned, episodeNo, subtitle };
+  return { cleanedText: cleaned, episodeNo, subtitle };
 }
 
 export default function Page() {
@@ -567,7 +587,9 @@ export default function Page() {
   ========================= */
   // ✅ 기본값 “패러디소설” 제거 (원문에 없는 문구 추가 금지)
   const [seriesTitle, setSeriesTitle] = useState("");
-  const [episodeNo, setEpisodeNo] = useState(1);
+
+  // ✅ 회차 기본값 임의 생성 금지: null부터 시작
+  const [episodeNo, setEpisodeNo] = useState<number | null>(null);
 
   // 원문 부제목(저장용)
   const [subtitle, setSubtitle] = useState("");
@@ -623,8 +645,9 @@ export default function Page() {
   const [historyPage, setHistoryPage] = useState(1);
 
   // ✅ 헤더는 “회차(큰 제목) + 번역된 부제목(작은 줄)”
+  //    회차가 없으면 epLine은 빈 문자열
   const headerPreview = useMemo(() => {
-    const epLine = `제 ${episodeNo}화`;
+    const epLine = episodeNo != null ? `제 ${episodeNo}화` : "";
     const subLine = translatedSubtitle.trim();
     return { epLine, subLine };
   }, [episodeNo, translatedSubtitle]);
@@ -719,7 +742,10 @@ export default function Page() {
     if (typeof s.manualOpen === "boolean") setManualOpen(s.manualOpen);
 
     if (typeof s.seriesTitle === "string") setSeriesTitle(s.seriesTitle || "");
-    if (typeof s.episodeNo === "number") setEpisodeNo(Math.max(1, Math.floor(s.episodeNo || 1)));
+
+    if (typeof s.episodeNo === "number") setEpisodeNo(Math.max(1, Math.floor(s.episodeNo)));
+    else if (s.episodeNo === null) setEpisodeNo(null);
+
     if (typeof s.subtitle === "string") setSubtitle(s.subtitle || "");
     if (typeof s.translatedSubtitle === "string") setTranslatedSubtitle(s.translatedSubtitle || "");
 
@@ -874,7 +900,7 @@ export default function Page() {
     const nextFolders = folders.filter((x) => !idsToDelete.includes(x.id));
     persistFolders(nextFolders);
 
-    const nextHistory = history.filter((h) => !idsToDelete.includes((h.folderId || "") as string));
+    const nextHistory = history.filter((h) => !idsToDelete.includes(((h.folderId || "") as string) || ""));
     persistHistory(nextHistory);
 
     setSelectedFolderId(f.parentId);
@@ -941,6 +967,7 @@ export default function Page() {
         setResultBody("");
         setTranslatedSubtitle("");
         setSubtitle("");
+        setEpisodeNo(null);
       }
     }
 
@@ -949,7 +976,7 @@ export default function Page() {
 
   function loadHistoryItem(it: HistoryItem) {
     setSeriesTitle(it.seriesTitle || "");
-    setEpisodeNo(it.episodeNo);
+    setEpisodeNo(it.episodeNo ?? null);
     setSubtitle(it.subtitle || "");
     setTranslatedSubtitle(it.translatedSubtitle || "");
     setSource(it.sourceText);
@@ -1006,7 +1033,7 @@ export default function Page() {
     translatedBody: string;
     url?: string;
     seriesTitle: string;
-    episodeNo: number;
+    episodeNo: number | null;
     subtitle: string;
     translatedSubtitle: string;
     showHeader: boolean;
@@ -1015,7 +1042,7 @@ export default function Page() {
       id: uid(),
       createdAt: Date.now(),
       seriesTitle: params.seriesTitle.trim() || "", // ✅ 자동 기본값 금지
-      episodeNo: Math.max(1, Math.floor(params.episodeNo || 1)),
+      episodeNo: params.episodeNo, // ✅ 없으면 null 유지
       subtitle: params.subtitle.trim(),
       translatedSubtitle: params.translatedSubtitle.trim(),
       sourceText: params.sourceText,
@@ -1055,13 +1082,13 @@ export default function Page() {
     const controller = new AbortController();
     abortRef.current = controller;
 
-    // ✅ 작업용 변수
+    // ✅ 작업용 변수 (원문에서 추출 못하면 null 유지)
     let workingText = rawText;
-    let nextEpisodeNo = episodeNo;
-    let nextSubtitle = subtitle;
-    let nextTranslatedSubtitle = translatedSubtitle;
+    let nextEpisodeNo: number | null = null; // 🔥 임의 1화 생성 금지
+    let nextSubtitle = "";
+    let nextTranslatedSubtitle = "";
 
-    // ✅ "실제로 추출했는지" 플래그(기본값 1 때문에 헤더가 뜨는 문제 방지)
+    // 추출 성공 여부 플래그
     let extractedEpisode = false;
     let extractedSubtitle = false;
 
@@ -1072,14 +1099,18 @@ export default function Page() {
         if (r.cleanedText.trim()) workingText = r.cleanedText;
 
         if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) {
-          extractedEpisode = true;
           nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
+          extractedEpisode = true;
           setEpisodeNo(nextEpisodeNo);
+        } else {
+          nextEpisodeNo = null;
+          extractedEpisode = false;
+          setEpisodeNo(null);
         }
 
         if (typeof r.subtitle === "string" && r.subtitle.trim()) {
-          extractedSubtitle = true;
           nextSubtitle = r.subtitle.trim();
+          extractedSubtitle = true;
           setSubtitle(nextSubtitle);
 
           // ✅ 부제목도 번역해서 표시용으로 저장
@@ -1093,12 +1124,17 @@ export default function Page() {
             setTranslatedSubtitle(nextTranslatedSubtitle);
           }
         } else {
-          // 부제목을 못 찾으면 헤더 부제목은 비움
+          extractedSubtitle = false;
           nextSubtitle = "";
           nextTranslatedSubtitle = "";
           setSubtitle("");
           setTranslatedSubtitle("");
         }
+      } else {
+        // 프리셋 OFF면 헤더 관련 값은 유지하지 않음
+        setEpisodeNo(null);
+        setSubtitle("");
+        setTranslatedSubtitle("");
       }
 
       const chunks = chunkText(workingText, 4500);
@@ -1117,20 +1153,22 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 헤더는 “프리셋 ON + 실제로 회차/부제목을 뽑았을 때만”
-      const hasRealHeader = settings.pixivPresetEnabled && (extractedEpisode || extractedSubtitle);
+      // ✅ 헤더는 “프리셋 ON + (원문에서 회차/부제목을 실제로 뽑았을 때만)”
+      const hasRealHeader =
+        settings.pixivPresetEnabled && (extractedEpisode || (extractedSubtitle && !!nextTranslatedSubtitle.trim()));
+
       const nextShowHeader = hasRealHeader;
-      setShowHeader(nextShowHeader);
+      setShowHeader(!!nextShowHeader);
 
       autoSaveToHistory({
         sourceText: rawText.trim(),
         translatedBody: out,
         url: opts?.sourceUrl,
         seriesTitle: seriesTitle.trim() || "", // ✅ 자동 기본값 금지
-        episodeNo: nextEpisodeNo,
-        subtitle: nextSubtitle,
-        translatedSubtitle: nextTranslatedSubtitle,
-        showHeader: nextShowHeader,
+        episodeNo: extractedEpisode ? nextEpisodeNo : null,
+        subtitle: extractedSubtitle ? nextSubtitle : "",
+        translatedSubtitle: extractedSubtitle ? nextTranslatedSubtitle : "",
+        showHeader: !!nextShowHeader,
       });
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
@@ -1449,7 +1487,9 @@ export default function Page() {
             {/* ✅ 프리셋 상태 표시(가볍게) */}
             <div style={{ fontSize: 12, opacity: 0.7, marginTop: 8 }}>
               Pixiv 프리셋: <b>{settings.pixivPresetEnabled ? "ON" : "OFF"}</b>
-              {settings.pixivPresetEnabled ? " · 수동 번역에도 회차/부제목 정리 + 헤더 적용" : ""}
+              {settings.pixivPresetEnabled
+                ? " · 수동 번역에도 회차/부제목 정리 + 헤더 적용(원문에서 추출된 경우만)"
+                : ""}
             </div>
           </div>
         </details>
@@ -1484,10 +1524,12 @@ export default function Page() {
               <>
                 {showHeader && (
                   <>
-                    {/* ✅ 큰 제목: 회차만 */}
-                    <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
-                      {headerPreview.epLine}
-                    </div>
+                    {/* ✅ 큰 제목: 회차만 (없으면 표시 X) */}
+                    {!!headerPreview.epLine && (
+                      <div style={{ fontSize: 28, fontWeight: 900, marginBottom: 10 }}>
+                        {headerPreview.epLine}
+                      </div>
+                    )}
 
                     {/* ✅ 작은 줄: 번역된 부제목만 (없으면 표시 X) */}
                     {headerPreview.subLine && (
@@ -1617,9 +1659,9 @@ export default function Page() {
 
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
                     ON이면 수동 번역에서도 회차/부제목을 추출하고, 결과 상단에{" "}
-                    <b>제○화(큰 제목) + 번역된 부제목(작은 줄)</b>로 표시해.
-                    <br />
-                    ✅ 단, <b>실제로 추출 성공했을 때만</b> 헤더가 뜨고, 원문에 없는 문구는 절대 추가하지 않아.
+                    <b>제○화(큰 제목) + 번역된 부제목(작은 줄)</b>로 표시해.{" "}
+                    <b>단, 원문에서 실제로 추출된 경우에만</b> 헤더가 생겨. <br />
+                    또한 <b>Side / Side Fate / Side out</b>은 부제목 후보에서 제외해.
                   </div>
 
                   <div style={{ height: 10 }} />
@@ -1679,9 +1721,7 @@ export default function Page() {
                         Noto Serif KR / 명조
                       </option>
                       <option
-                        value={
-                          'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'
-                        }
+                        value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}
                       >
                         산세리프(가독)
                       </option>
@@ -1689,9 +1729,7 @@ export default function Page() {
                         세리프(소설 느낌)
                       </option>
                       <option
-                        value={
-                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
-                        }
+                        value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}
                       >
                         고정폭(모노)
                       </option>
@@ -2128,7 +2166,7 @@ export default function Page() {
                 <>
                   <div style={{ display: "grid", gap: 10, paddingBottom: 62 }}>
                     {pagedHistory.map((it) => {
-                      const label = `${it.episodeNo}화`;
+                      const label = it.episodeNo != null ? `${it.episodeNo}화` : "회차 없음";
                       const checked = !!selectedIds[it.id];
 
                       return (
@@ -2173,7 +2211,11 @@ export default function Page() {
                           >
                             <div style={{ fontWeight: 900 }}>
                               {label}
-                              {it.translatedSubtitle ? ` · ${it.translatedSubtitle}` : it.subtitle ? ` · ${it.subtitle}` : ""}
+                              {it.translatedSubtitle
+                                ? ` · ${it.translatedSubtitle}`
+                                : it.subtitle
+                                ? ` · ${it.subtitle}`
+                                : ""}
                             </div>
                             <div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>
                               {formatDate(it.createdAt)}
