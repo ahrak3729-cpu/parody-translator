@@ -17,36 +17,53 @@ function isPixiv(url: string) {
 }
 
 function isPixivNovelShow(u: URL) {
-  // 대표 케이스: https://www.pixiv.net/novel/show.php?id=10461103
   return u.hostname.includes("pixiv.net") && u.pathname === "/novel/show.php" && !!u.searchParams.get("id");
 }
 
 function buildCommonHeaders() {
+  // 너무 과하게 헤더를 넣는 건 오히려 역효과일 때도 있어서 "필수+무난"만
   return {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
     "accept-language": "ko-KR,ko;q=0.9,en;q=0.8",
-    // Pixiv AJAX는 이거 있으면 성공률이 약간 올라가
-    "x-requested-with": "XMLHttpRequest",
   } as Record<string, string>;
 }
 
-async function safeReadJson(res: Response) {
+async function safeReadJsonWithMeta(res: Response) {
   const contentType = res.headers.get("content-type") || "";
   const raw = await res.text();
 
-  if (!raw.trim()) return { __raw: "", __notJson: true, __contentType: contentType };
+  if (!raw.trim()) {
+    return {
+      okJson: false,
+      data: null,
+      meta: { contentType, raw: "", notJson: true },
+    };
+  }
 
   try {
-    return JSON.parse(raw);
+    const data = JSON.parse(raw);
+    return { okJson: true, data, meta: { contentType, raw: "", notJson: false } };
   } catch {
-    return { __raw: raw, __notJson: true, __contentType: contentType };
+    // JSON이 아닌 경우(대개 HTML 차단 페이지)
+    return {
+      okJson: false,
+      data: null,
+      meta: {
+        contentType,
+        raw: raw.slice(0, 800), // 너무 길게는 안 줌
+        notJson: true,
+      },
+    };
   }
 }
 
+function normalizeText(s: string) {
+  return (s || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 /** -------------------------
- *  Pixiv Novel Extract (AJAX API)
- *  - 분할 소설 포함: pages를 합쳐서 반환
+ *  Pixiv Novel Extract (AJAX)
  *  ------------------------- */
 async function extractPixivNovel(u: URL, cookie: string) {
   const novelId = u.searchParams.get("id")!;
@@ -64,80 +81,90 @@ async function extractPixivNovel(u: URL, cookie: string) {
     };
   }
 
-  // Pixiv AJAX는 보통 referer/origin/cookie가 중요
   headers["cookie"] = c;
   headers["referer"] = `https://www.pixiv.net/novel/show.php?id=${encodeURIComponent(novelId)}`;
   headers["origin"] = "https://www.pixiv.net";
-  headers["accept"] = "application/json, text/plain, */*";
 
-  // 1) 메타(제목 등) 가져오기
+  // AJAX쪽은 accept를 명확히
+  const ajaxHeaders = {
+    ...headers,
+    accept: "application/json, text/plain, */*",
+    "x-requested-with": "XMLHttpRequest",
+  };
+
+  // 1) meta
   const metaRes = await fetch(`https://www.pixiv.net/ajax/novel/${encodeURIComponent(novelId)}`, {
-    headers,
+    headers: ajaxHeaders,
   });
-  const metaJson: any = await safeReadJson(metaRes);
 
-  if (!metaRes.ok) {
-    // 쿠키 만료/권한/차단 등
+  const metaRead = await safeReadJsonWithMeta(metaRes);
+  if (!metaRes.ok || !metaRead.okJson) {
     return {
       ok: false as const,
-      status: metaRes.status,
+      status: metaRes.status || 400,
       body: {
-        error: `Pixiv 메타 가져오기 실패: ${metaRes.status} ${metaRes.statusText}\n(쿠키 만료/권한/차단 가능)`,
-        code: "PIXIV_META_FETCH_FAILED",
-        detail: metaJson?.error || metaJson?.message || undefined,
+        error:
+          `Pixiv 메타 요청 실패 (${metaRes.status} ${metaRes.statusText})\n` +
+          `- content-type: ${metaRead.meta.contentType || "unknown"}\n` +
+          (metaRead.meta.notJson
+            ? "Pixiv가 JSON 대신 HTML을 반환했어요(차단/캡차/로그인 유도 가능).\n"
+            : ""),
+        code: metaRead.meta.notJson ? "PIXIV_RETURNED_NON_JSON_META" : "PIXIV_META_FETCH_FAILED",
+        debug: metaRead.meta.notJson ? metaRead.meta.raw : undefined,
       },
     };
   }
 
+  const metaJson: any = metaRead.data;
   const title =
     String(metaJson?.body?.title ?? "").trim() ||
     String(metaJson?.body?.novelTitle ?? "").trim() ||
     "";
 
-  // 2) pages 가져오기 (페이지 분할/단일 모두 여기서 텍스트 얻는 게 제일 안정적)
+  // 2) pages
   const pagesRes = await fetch(`https://www.pixiv.net/ajax/novel/${encodeURIComponent(novelId)}/pages`, {
-    headers,
+    headers: ajaxHeaders,
   });
-  const pagesJson: any = await safeReadJson(pagesRes);
 
-  if (!pagesRes.ok) {
+  const pagesRead = await safeReadJsonWithMeta(pagesRes);
+  if (!pagesRes.ok || !pagesRead.okJson) {
     return {
       ok: false as const,
-      status: pagesRes.status,
+      status: pagesRes.status || 400,
       body: {
-        error: `Pixiv 페이지 가져오기 실패: ${pagesRes.status} ${pagesRes.statusText}\n(쿠키 만료/권한/차단 가능)`,
-        code: "PIXIV_PAGES_FETCH_FAILED",
-        detail: pagesJson?.error || pagesJson?.message || undefined,
+        error:
+          `Pixiv pages 요청 실패 (${pagesRes.status} ${pagesRes.statusText})\n` +
+          `- content-type: ${pagesRead.meta.contentType || "unknown"}\n` +
+          (pagesRead.meta.notJson
+            ? "Pixiv가 JSON 대신 HTML을 반환했어요(서버 IP 차단/봇 체크/캡차 가능).\n"
+            : ""),
+        code: pagesRead.meta.notJson ? "PIXIV_RETURNED_NON_JSON_PAGES" : "PIXIV_PAGES_FETCH_FAILED",
+        debug: pagesRead.meta.notJson ? pagesRead.meta.raw : undefined,
       },
     };
   }
 
-  // Pixiv 응답 구조가 바뀔 수 있어서 최대한 방어적으로 처리
-  // 흔한 형태:
-  // { body: [ { text: "..." }, { text: "..." } ] } 또는
-  // { body: { pages: [ { text: "..." } ] } } 또는
-  // { body: { content: "..." } } (단일일 때)
-  let text = "";
-
+  const pagesJson: any = pagesRead.data;
   const body = pagesJson?.body;
 
+  let text = "";
+
   if (Array.isArray(body)) {
-    // body가 배열인 경우: pages 배열로 취급
     const parts = body
       .map((p: any) => (p?.text ?? p?.content ?? "").toString())
-      .map((s: string) => s.trim())
+      .map((s: string) => normalizeText(s))
       .filter(Boolean);
     text = parts.join("\n\n");
   } else if (body && Array.isArray(body.pages)) {
     const parts = body.pages
       .map((p: any) => (p?.text ?? p?.content ?? "").toString())
-      .map((s: string) => s.trim())
+      .map((s: string) => normalizeText(s))
       .filter(Boolean);
     text = parts.join("\n\n");
   } else if (body?.content) {
-    text = String(body.content || "").trim();
+    text = normalizeText(String(body.content || ""));
   } else if (body?.text) {
-    text = String(body.text || "").trim();
+    text = normalizeText(String(body.text || ""));
   }
 
   if (!text) {
@@ -146,17 +173,15 @@ async function extractPixivNovel(u: URL, cookie: string) {
       status: 400,
       body: {
         error:
-          "Pixiv 본문을 추출하지 못했어요.\n- 쿠키가 만료됐거나\n- 비공개/연령 제한/권한 제한이 있거나\n- Pixiv 구조 변경으로 pages 응답 파싱이 실패했을 수 있어요.\n텍스트 직접 붙여넣기도 함께 준비해두는 걸 추천해.",
+          "Pixiv pages 응답은 받았는데 본문이 비어있어요.\n" +
+          "- 권한/차단/구조변경 가능\n" +
+          "- 또는 pages 응답 구조가 예상과 달라졌을 수 있어요.",
         code: "PIXIV_EXTRACT_EMPTY",
       },
     };
   }
 
-  return {
-    ok: true as const,
-    status: 200,
-    body: { title, text },
-  };
+  return { ok: true as const, status: 200, body: { title, text } };
 }
 
 /** -------------------------
@@ -180,12 +205,12 @@ async function extractGeneric(url: string) {
   const article = reader.parse();
 
   const text =
-    (article?.textContent ?? "").trim() ||
-    dom.window.document.body?.textContent?.replace(/\n{3,}/g, "\n\n").trim() ||
+    normalizeText(article?.textContent ?? "") ||
+    normalizeText(dom.window.document.body?.textContent ?? "") ||
     "";
 
   const title =
-    (article?.title ?? "").trim() ||
+    String(article?.title ?? "").trim() ||
     dom.window.document.querySelector("title")?.textContent?.trim() ||
     "";
 
@@ -195,7 +220,7 @@ async function extractGeneric(url: string) {
       status: 400,
       body: {
         error:
-          "본문을 추출하지 못했어요.\n- 사이트가 JS로 렌더링되거나\n- 차단/권한 문제이거나\n- 구조가 Readability로는 잡히지 않을 수 있어요.\n텍스트 직접 붙여넣기로도 시도해줘.",
+          "본문을 추출하지 못했어요.\n- 사이트가 JS로 렌더링되거나\n- 차단/권한 문제이거나\n- 구조가 Readability로는 잡히지 않을 수 있어요.",
         code: "EXTRACT_EMPTY",
       },
     };
@@ -219,13 +244,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "올바른 URL 형식이 아니에요." }, { status: 400 });
     }
 
-    // ✅ Pixiv 분기: novel/show.php?id=... 은 AJAX API로 처리
+    // Pixiv novel/show.php?id=... 은 AJAX로
     if (isPixiv(parsed.toString()) && isPixivNovelShow(parsed)) {
       const r = await extractPixivNovel(parsed, cookie || "");
       return NextResponse.json(r.body, { status: r.status });
     }
 
-    // ✅ 그 외는 일반 Readability 추출
+    // others
     const r = await extractGeneric(parsed.toString());
     return NextResponse.json(r.body, { status: r.status });
   } catch (e: any) {
