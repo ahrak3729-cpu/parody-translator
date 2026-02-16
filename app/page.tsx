@@ -57,7 +57,7 @@ type HistoryItem = {
   translatedText: string; // 본문만 저장
   url?: string;
   folderId?: string | null;
-  showHeader?: boolean; // URL 번역이면 true, 수동이면 false
+  showHeader?: boolean; // URL 번역이면 true, 수동이면 false(기본) — Pixiv 프리셋 ON이면 수동도 true
 };
 
 type HistoryFolder = {
@@ -77,7 +77,7 @@ type AppSettings = {
   viewerPadding: number;
   viewerRadius: number;
 
-  // ✅ 폰트
+  // 폰트
   fontFamily: string;
 
   // 배경/색상 (HSL)
@@ -101,6 +101,12 @@ type AppSettings = {
 
   // Pixiv 쿠키
   pixivCookie: string;
+
+  // ✅ Pixiv 프리셋 ON/OFF (신규)
+  pixivPresetEnabled: boolean;
+
+  // ✅ Pixiv 메타 제거 강도 (신규 - 기본 true)
+  pixivStripMeta: boolean;
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -110,7 +116,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   viewerPadding: 16,
   viewerRadius: 14,
 
-  // ✅ 기본 폰트(시스템)
+  // 기본 폰트(시스템)
   fontFamily:
     'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif',
 
@@ -127,86 +133,21 @@ const DEFAULT_SETTINGS: AppSettings = {
   textS: 35,
   textL: 16,
 
-  bgPatternUrl: "", // 기본은 비워둠(원하면 URL 넣기)
+  bgPatternUrl: "",
   bgPatternOpacity: 0.18,
   bgPatternSize: 900,
   bgPatternBlend: 0.35,
 
   pixivCookie: "",
+
+  // ✅ 신규 기본값
+  pixivPresetEnabled: false,
+  pixivStripMeta: true,
 };
 
 const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지 (충돌 방지)
-const SESSION_KEY = "parody_translator_session_v1"; // ✅ 현재 화면 상태 저장용(신규)
+const SESSION_KEY = "parody_translator_session_v1"; // 현재 화면 상태 저장용(신규)
 
-/* =========================
-   ✅ Pixiv 프리셋 (토글 + 오버라이드)
-========================= */
-const PIXIV_PRESET_KEY = "parody_translator_pixiv_preset_v1";
-const PIXIV_PRESET_OVERRIDES_KEY = "parody_translator_pixiv_preset_overrides_v1";
-
-type PixivPresetOverrides = Partial<AppSettings>;
-
-const PIXIV_PRESET_DEFAULT: PixivPresetOverrides = {
-  fontSize: 17,
-  lineHeight: 1.85,
-  viewerPadding: 18,
-  viewerRadius: 16,
-
-  // 소설 느낌(세리프)
-  fontFamily: 'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif',
-
-  // 살짝 더 “종이” 느낌
-  appBgH: 40,
-  appBgS: 22,
-  appBgL: 96,
-
-  cardBgH: 40,
-  cardBgS: 18,
-  cardBgL: 99,
-
-  textH: 28,
-  textS: 28,
-  textL: 14,
-};
-
-function loadPixivPresetEnabled(): boolean {
-  try {
-    const raw = localStorage.getItem(PIXIV_PRESET_KEY);
-    if (!raw) return false;
-    return !!JSON.parse(raw);
-  } catch {
-    return false;
-  }
-}
-
-function savePixivPresetEnabled(v: boolean) {
-  localStorage.setItem(PIXIV_PRESET_KEY, JSON.stringify(!!v));
-}
-
-function loadPixivPresetOverrides(): PixivPresetOverrides {
-  try {
-    const raw = localStorage.getItem(PIXIV_PRESET_OVERRIDES_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed as PixivPresetOverrides;
-  } catch {
-    return {};
-  }
-}
-
-function savePixivPresetOverrides(v: PixivPresetOverrides) {
-  localStorage.setItem(PIXIV_PRESET_OVERRIDES_KEY, JSON.stringify(v || {}));
-}
-
-function applyPixivPreset(base: AppSettings, enabled: boolean, overrides: PixivPresetOverrides): AppSettings {
-  if (!enabled) return base;
-  return { ...base, ...PIXIV_PRESET_DEFAULT, ...(overrides || {}) };
-}
-
-/* =========================
-   Utils
-========================= */
 function uid() {
   return `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -223,6 +164,7 @@ function loadSettings(): AppSettings {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
+    // ✅ 기존 데이터 + 신규 필드 안전 병합
     return { ...DEFAULT_SETTINGS, ...(parsed || {}) };
   } catch {
     return DEFAULT_SETTINGS;
@@ -329,7 +271,7 @@ function MenuButton(props: { label: string; onClick: () => void; disabled?: bool
 }
 
 /* =========================
-   ✅ 라벨 옆 슬라이더 (가로형)
+   라벨 옆 슬라이더 (가로형)
 ========================= */
 function LabeledSlider(props: {
   label: string;
@@ -366,7 +308,7 @@ function LabeledSlider(props: {
 }
 
 /* =========================
-   ✅ 세션(현재 화면) 저장/복원
+   세션(현재 화면) 저장/복원
 ========================= */
 type AppSession = {
   url: string;
@@ -397,58 +339,196 @@ function saveSession(s: AppSession) {
   localStorage.setItem(SESSION_KEY, JSON.stringify(s));
 }
 
+/* =========================
+   ✅ Pixiv 프리셋: 텍스트 전처리
+   - 회차 / 제목 감지
+   - 날짜/시간/작가명 제거
+   - 결과는 "제○화\n제목\n\n본문" 구조로 정리
+========================= */
+
+function normalizeNewlines(s: string) {
+  return (s || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function isLikelyMetaLine(line: string) {
+  const l = line.trim();
+  if (!l) return true;
+
+  // 날짜/시간(한/일/영 혼합 대비)
+  const dateLike =
+    /\b(20\d{2})[./-]\d{1,2}[./-]\d{1,2}\b/.test(l) ||
+    /\b(20\d{2})\s*년\s*\d{1,2}\s*월\s*\d{1,2}\s*일\b/.test(l) ||
+    /\b\d{1,2}\s*월\s*\d{1,2}\s*일\b/.test(l) ||
+    /\b\d{1,2}:\d{2}\b/.test(l);
+
+  // Pixiv UI/통계/라벨
+  const pixivUi =
+    /(ブックマーク|いいね|閲覧|文字数|公開|非公開|シリーズ|作品|感想|フォロー|マイピク|投稿|更新)/.test(l) ||
+    /(조회|추천|좋아요|북마크|작가|작성자|게시|업로드|업뎃|업데이트|공개|비공개)/.test(l);
+
+  // 작가명 라인 추정
+  const authorLike =
+    /^(by\s+).+/i.test(l) ||
+    /(作者|作家|投稿者|ユーザー|user)/i.test(l) ||
+    /(작가|작성자|글쓴이)/.test(l);
+
+  // 너무 짧은 UI 라벨 단독
+  const shortJunk = l.length <= 2 && /[★☆♡♥]/.test(l);
+
+  return dateLike || pixivUi || authorLike || shortJunk;
+}
+
+function parseEpisodeNo(line: string): number | null {
+  const l = line.trim();
+
+  // "제 12화" / "제12화" / "12화" / "第12話"
+  const m1 = l.match(/^\s*제?\s*(\d{1,4})\s*화\s*$/);
+  if (m1) return Number(m1[1]);
+
+  const m2 = l.match(/^\s*(\d{1,4})\s*화\s*$/);
+  if (m2) return Number(m2[1]);
+
+  const m3 = l.match(/^\s*第\s*(\d{1,4})\s*話\s*$/);
+  if (m3) return Number(m3[1]);
+
+  // "제 12화." 같은 변형
+  const m4 = l.match(/^\s*제?\s*(\d{1,4})\s*화[.)\s-]/);
+  if (m4) return Number(m4[1]);
+
+  const m5 = l.match(/^\s*第\s*(\d{1,4})\s*話[.)\s-]/);
+  if (m5) return Number(m5[1]);
+
+  return null;
+}
+
+type PixivPresetResult = {
+  cleanedText: string;
+  episodeNo: number | null;
+  subtitle: string | null;
+};
+
+function applyPixivPreset(raw: string, stripMeta: boolean): PixivPresetResult {
+  const text = normalizeNewlines(raw);
+  if (!text) return { cleanedText: "", episodeNo: null, subtitle: null };
+
+  const lines = text.split("\n").map((x) => x.trimEnd());
+  const kept: string[] = [];
+
+  // 1) 1차 메타 제거(옵션)
+  for (const line of lines) {
+    const t = line.trim();
+    if (!stripMeta) {
+      kept.push(line);
+      continue;
+    }
+    // 빈 줄은 살리되 과도하게 누적은 normalize에서 정리됨
+    if (!t) {
+      kept.push("");
+      continue;
+    }
+    // 메타로 보이면 제거
+    if (isLikelyMetaLine(t)) continue;
+    kept.push(line);
+  }
+
+  const compact = normalizeNewlines(kept.join("\n"));
+  const lines2 = compact.split("\n").map((x) => x.trim());
+  let ep: number | null = null;
+  let title: string | null = null;
+
+  // 2) 상단에서 회차/제목 탐색
+  //   - 회차는 상단 10줄 정도에서 우선 찾고
+  //   - 제목은 회차 다음의 첫 유의미 라인
+  const scanLimit = Math.min(lines2.length, 12);
+  let epIndex = -1;
+
+  for (let i = 0; i < scanLimit; i++) {
+    const cand = lines2[i]?.trim();
+    if (!cand) continue;
+    const n = parseEpisodeNo(cand);
+    if (n !== null) {
+      ep = n;
+      epIndex = i;
+      break;
+    }
+  }
+
+  if (epIndex >= 0) {
+    for (let j = epIndex + 1; j < Math.min(lines2.length, epIndex + 6); j++) {
+      const cand = lines2[j]?.trim();
+      if (!cand) continue;
+      // 제목으로 보기 애매한 메타는 제외
+      if (stripMeta && isLikelyMetaLine(cand)) continue;
+      title = cand;
+      break;
+    }
+  } else {
+    // 회차를 못 찾으면 "첫 유의미 라인"을 제목 후보로만 잡고 종료
+    for (let i = 0; i < scanLimit; i++) {
+      const cand = lines2[i]?.trim();
+      if (!cand) continue;
+      if (stripMeta && isLikelyMetaLine(cand)) continue;
+      title = cand;
+      break;
+    }
+  }
+
+  // 3) 본문 구성: (ep/title 부분을 제거하고) 남은 라인
+  let bodyLines = lines2.slice();
+  if (epIndex >= 0) {
+    // ep 라인 제거
+    bodyLines.splice(epIndex, 1);
+    // title 라인이 바로 뒤에 있었으면 제거(같은 텍스트 기준)
+    if (title) {
+      const idx = bodyLines.findIndex((x) => x.trim() === title);
+      if (idx >= 0 && idx < 6) bodyLines.splice(idx, 1);
+    }
+  } else {
+    // ep 없으면, title만 상단에 있으면 제거(최초 1개)
+    if (title) {
+      const idx = bodyLines.findIndex((x) => x.trim() === title);
+      if (idx >= 0 && idx < 4) bodyLines.splice(idx, 1);
+    }
+  }
+
+  const body = normalizeNewlines(bodyLines.join("\n"));
+
+  // 4) 최종 텍스트: "제○화\n제목\n\n본문" (회차/제목이 있을 때만 포함)
+  const headerParts: string[] = [];
+  if (ep !== null) headerParts.push(`제 ${ep}화`);
+  if (title) headerParts.push(title);
+
+  const cleanedText = normalizeNewlines(
+    (headerParts.length ? headerParts.join("\n") + "\n\n" : "") + body
+  );
+
+  return { cleanedText, episodeNo: ep, subtitle: title };
+}
+
 export default function Page() {
   /* =========================
      Settings (persisted)
   ========================= */
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
+  // "설정을 로드한 뒤에만 저장" 가드
   const settingsHydratedRef = useRef(false);
 
-  // ✅ Pixiv 프리셋 (persisted)
-  const [pixivPresetEnabled, setPixivPresetEnabled] = useState(false);
-  const [pixivPresetOverrides, setPixivPresetOverrides] = useState<PixivPresetOverrides>({});
-  const pixivPresetHydratedRef = useRef(false);
-  const pixivOverridesHydratedRef = useRef(false);
-
-  // ✅ Pixiv 프리셋 편집 draft
-  const [pixivDraftOverrides, setPixivDraftOverrides] = useState<PixivPresetOverrides>({});
-  const [pixivDirty, setPixivDirty] = useState(false);
-
-  // 설정 모달(draft)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
-  const [settingsDirty, setSettingsDirty] = useState(false);
-
-  // ✅ 마운트 후 1회: localStorage에서 settings + pixiv preset 로드
+  // 마운트 후 1회: localStorage에서 settings 로드
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const loaded = loadSettings();
     setSettings(loaded);
 
-    // 설정 모달 draft도 동기화 (초기 폰트/배경이 안 꼬이게)
+    // 설정 모달 draft도 동기화
     setDraftSettings(loaded);
     setSettingsDirty(false);
 
     settingsHydratedRef.current = true;
-
-    // Pixiv preset
-    const enabled = loadPixivPresetEnabled();
-    setPixivPresetEnabled(enabled);
-
-    const overrides = loadPixivPresetOverrides();
-    setPixivPresetOverrides(overrides);
-
-    setPixivDraftOverrides(overrides);
-    setPixivDirty(false);
-
-    pixivPresetHydratedRef.current = true;
-    pixivOverridesHydratedRef.current = true;
   }, []);
 
-  // ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
+  // settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!settingsHydratedRef.current) return;
@@ -458,34 +538,17 @@ export default function Page() {
     } catch {}
   }, [settings]);
 
-  // ✅ pixiv preset 저장
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!pixivPresetHydratedRef.current) return;
-    try {
-      savePixivPresetEnabled(pixivPresetEnabled);
-    } catch {}
-  }, [pixivPresetEnabled]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!pixivOverridesHydratedRef.current) return;
-    try {
-      savePixivPresetOverrides(pixivPresetOverrides);
-    } catch {}
-  }, [pixivPresetOverrides]);
+  // 설정 모달(draft)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [settingsDirty, setSettingsDirty] = useState(false);
 
   function openSettings() {
-    // ✅ 항상 "현재 settings"를 draft로 가져옴
     setDraftSettings(settings);
     setSettingsDirty(false);
-
-    // ✅ Pixiv 프리셋 draft도 현재 값으로 동기화
-    setPixivDraftOverrides(pixivPresetOverrides);
-    setPixivDirty(false);
-
     setSettingsOpen(true);
   }
+
   function updateDraft(patch: Partial<AppSettings>) {
     setDraftSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -493,55 +556,19 @@ export default function Page() {
       return next;
     });
   }
+
   function saveDraft() {
-    // ✅ 저장 버튼을 눌렀을 때만 settings에 반영
     setSettings(draftSettings);
     try {
       saveSettings(draftSettings);
     } catch {}
     setSettingsDirty(false);
   }
+
   function undoDraft() {
     setDraftSettings(settings);
     setSettingsDirty(false);
   }
-
-  // Pixiv preset draft helpers
-  function updatePixivDraft(patch: PixivPresetOverrides) {
-    setPixivDraftOverrides((prev) => {
-      const next = { ...prev, ...patch };
-      setPixivDirty(true);
-      return next;
-    });
-  }
-  function savePixivDraft() {
-    setPixivPresetOverrides(pixivDraftOverrides);
-    try {
-      savePixivPresetOverrides(pixivDraftOverrides);
-    } catch {}
-    setPixivDirty(false);
-  }
-  function undoPixivDraft() {
-    setPixivDraftOverrides(pixivPresetOverrides);
-    setPixivDirty(false);
-  }
-  function resetPixivDraftToDefault() {
-    setPixivDraftOverrides({});
-    setPixivDirty(true);
-  }
-
-  /* =========================
-     ✅ 적용되는 설정(= Pixiv 프리셋 반영)
-  ========================= */
-  const effectiveSettings = useMemo(() => {
-    return applyPixivPreset(settings, pixivPresetEnabled, pixivPresetOverrides);
-  }, [settings, pixivPresetEnabled, pixivPresetOverrides]);
-
-  const effectiveDraftSettings = useMemo(() => {
-    // 설정 모달의 미리보기는 “저장 전 draftSettings” 기준 + (현재 Pixiv 프리셋 토글/오버라이드 반영)
-    // 여기서는 base로 draftSettings를 쓰고, 오버라이드는 “편집 중 draft”로 반영해서 즉시 확인 가능하게 함
-    return applyPixivPreset(draftSettings, pixivPresetEnabled, pixivDraftOverrides);
-  }, [draftSettings, pixivPresetEnabled, pixivDraftOverrides]);
 
   /* =========================
      URL 중심
@@ -656,7 +683,10 @@ export default function Page() {
     return history.filter((h) => (h.folderId || null) === selectedFolderId);
   }, [history, selectedFolderId]);
 
-  const totalPages = useMemo(() => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)), [filteredHistory.length]);
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(filteredHistory.length / PAGE_SIZE)),
+    [filteredHistory.length]
+  );
 
   const pagedHistory = useMemo(() => {
     const start = (historyPage - 1) * PAGE_SIZE;
@@ -686,7 +716,7 @@ export default function Page() {
   }
 
   /* =========================
-     ✅ 새로고침 유지: 세션 복원
+     새로고침 유지: 세션 복원
   ========================= */
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -708,7 +738,7 @@ export default function Page() {
       setCurrentHistoryId(s.currentHistoryId ?? null);
   }, []);
 
-  // ✅ 세션 자동 저장(현재 화면 상태가 안 날아가게)
+  // 세션 자동 저장
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
@@ -887,7 +917,8 @@ export default function Page() {
     const next = history.filter((h) => !ids.includes(h.id));
     persistHistory(next);
 
-    const nextFiltered = selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
+    const nextFiltered =
+      selectedFolderId === null ? next : next.filter((h) => (h.folderId || null) === selectedFolderId);
     const nextTotalPages = Math.max(1, Math.ceil(nextFiltered.length / PAGE_SIZE));
     setHistoryPage((p) => Math.min(p, nextTotalPages));
 
@@ -988,8 +1019,12 @@ export default function Page() {
   }
 
   /* =========================
-     번역 실행
-  ========================= */
+     ✅ 번역 실행
+     - Pixiv 프리셋 ON이면 수동 번역도:
+       1) 텍스트 정리
+       2) episode/subtitle 자동 반영
+       3) 헤더 표시(showHeader=true)
+========================= */
   async function runTranslation(text: string, opts?: { mode: "manual" | "url"; sourceUrl?: string }) {
     if (!text.trim()) return;
 
@@ -1005,7 +1040,23 @@ export default function Page() {
     abortRef.current = controller;
 
     try {
-      const chunks = chunkText(text, 4500);
+      let workingText = text.trim();
+      let nextEpisodeNo = episodeNo;
+      let nextSubtitle = subtitle;
+
+      const pixivPresetOn = !!settings.pixivPresetEnabled;
+      if (pixivPresetOn) {
+        const r = applyPixivPreset(workingText, !!settings.pixivStripMeta);
+        if (r.cleanedText.trim()) workingText = r.cleanedText;
+        if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) nextEpisodeNo = r.episodeNo;
+        if (typeof r.subtitle === "string" && r.subtitle.trim()) nextSubtitle = r.subtitle.trim();
+
+        // ✅ 프리셋이 추출해준 메타를 화면 값에 반영 (사용자 편하게)
+        setEpisodeNo(nextEpisodeNo);
+        setSubtitle(nextSubtitle);
+      }
+
+      const chunks = chunkText(workingText, 4500);
       if (chunks.length > 80) throw new Error(`너무 길어서 자동 처리 부담이 큽니다. (분할 ${chunks.length}조각)`);
 
       setProgress({ current: 0, total: chunks.length });
@@ -1020,16 +1071,19 @@ export default function Page() {
       setResultBody(out);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      const nextShowHeader = mode === "url";
+      // ✅ 헤더 표시 규칙:
+      // - URL 모드: 항상 true
+      // - 수동 모드: Pixiv 프리셋 ON이면 true, 아니면 false(기존과 동일)
+      const nextShowHeader = mode === "url" ? true : !!settings.pixivPresetEnabled;
       setShowHeader(nextShowHeader);
 
       autoSaveToHistory({
-        sourceText: text.trim(),
+        sourceText: workingText,
         translatedBody: out,
         url: opts?.sourceUrl,
-        seriesTitle: headerPreview.title,
-        episodeNo,
-        subtitle,
+        seriesTitle: (seriesTitle || "패러디소설").trim() || "패러디소설",
+        episodeNo: nextEpisodeNo,
+        subtitle: nextSubtitle,
         showHeader: nextShowHeader,
       });
     } catch (e: any) {
@@ -1043,7 +1097,7 @@ export default function Page() {
 
   /* =========================
      URL → 본문 불러오기
-  ========================= */
+========================= */
   async function fetchFromUrl() {
     const u = url.trim();
     if (!u) return;
@@ -1057,7 +1111,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: u,
-          cookie: effectiveSettings.pixivCookie?.trim() || "",
+          cookie: settings.pixivCookie?.trim() || "",
         }),
       });
 
@@ -1070,18 +1124,28 @@ export default function Page() {
 
       if (data?.__notJson) {
         throw new Error(
-          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(다른 사이트로 테스트하거나, 텍스트 직접 붙여넣기로 확인해줘)"
+          "본문을 JSON으로 받지 못했어요. Pixiv는 로그인/봇 차단 때문에 서버에서 본문 추출이 실패할 수 있어요.\n(텍스트 직접 붙여넣기로 우회 가능)"
         );
       }
 
       if (data?.title) setSeriesTitle(String(data.title));
       const text = String(data?.text ?? "");
       if (!text.trim()) {
-        throw new Error("본문을 가져왔지만 내용이 비어있어요. (차단/권한 문제 가능)\n텍스트 직접 붙여넣기로 먼저 확인해줘.");
+        throw new Error("본문을 가져왔지만 내용이 비어있어요. (Pixiv 차단/권한 문제 가능)");
       }
 
       setSource(text);
-      await runTranslation(text, { mode: "url", sourceUrl: u });
+
+      // URL 모드도 Pixiv 프리셋 ON이면 정리해서 번역
+      let workingText = text;
+      if (settings.pixivPresetEnabled) {
+        const r = applyPixivPreset(text, !!settings.pixivStripMeta);
+        if (r.cleanedText.trim()) workingText = r.cleanedText;
+        if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) setEpisodeNo(r.episodeNo);
+        if (typeof r.subtitle === "string" && r.subtitle.trim()) setSubtitle(r.subtitle.trim());
+      }
+
+      await runTranslation(workingText, { mode: "url", sourceUrl: u });
     } catch (e: any) {
       setError(e?.message || "본문 불러오기 실패");
     } finally {
@@ -1091,7 +1155,7 @@ export default function Page() {
 
   /* =========================
      + 메뉴 앵커 계산 (모달 잘림 방지)
-  ========================= */
+========================= */
   function openMenuFromButton(e: React.MouseEvent<HTMLButtonElement>) {
     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
     const right = Math.max(12, window.innerWidth - rect.right);
@@ -1102,27 +1166,27 @@ export default function Page() {
 
   /* =========================
      현재 설정 기반 배경 스타일
-  ========================= */
-  const appBg = hsl(effectiveSettings.appBgH, effectiveSettings.appBgS, effectiveSettings.appBgL);
-  const cardBg = hsl(effectiveSettings.cardBgH, effectiveSettings.cardBgS, effectiveSettings.cardBgL);
-  const textColor = hsl(effectiveSettings.textH, effectiveSettings.textS, effectiveSettings.textL);
+========================= */
+  const appBg = hsl(settings.appBgH, settings.appBgS, settings.appBgL);
+  const cardBg = hsl(settings.cardBgH, settings.cardBgS, settings.cardBgL);
+  const textColor = hsl(settings.textH, settings.textS, settings.textL);
 
-  // ✅ 공통 카드: “카드 1겹” 규칙
+  // 공통 카드: “카드 1겹” 규칙
   const cardShellStyle: React.CSSProperties = {
     border: "1px solid rgba(0,0,0,0.18)",
-    borderRadius: effectiveSettings.viewerRadius,
+    borderRadius: settings.viewerRadius,
     background: cardBg,
     padding: 14,
   };
 
-  // ✅ 카드 안에 들어가는 입력요소: 테두리/배경 없음(레이아웃 고정)
+  // 카드 안 입력요소: 무테/무배경
   const innerInputBase: React.CSSProperties = {
     width: "100%",
     border: "none",
     outline: "none",
     background: "transparent",
     color: textColor,
-    fontFamily: effectiveSettings.fontFamily,
+    fontFamily: settings.fontFamily,
     fontSize: 15,
   };
 
@@ -1133,21 +1197,21 @@ export default function Page() {
         background: appBg,
         color: textColor,
         position: "relative",
-        fontFamily: effectiveSettings.fontFamily,
+        fontFamily: settings.fontFamily,
       }}
     >
-      {/* ✅ 페이지 전체 배경 패턴 (있을 때만) */}
-      {!!effectiveSettings.bgPatternUrl.trim() && (
+      {/* 페이지 전체 배경 패턴 (있을 때만) */}
+      {!!settings.bgPatternUrl.trim() && (
         <>
           <div
             style={{
               pointerEvents: "none",
               position: "fixed",
               inset: 0,
-              backgroundImage: `url(${effectiveSettings.bgPatternUrl.trim()})`,
+              backgroundImage: `url(${settings.bgPatternUrl.trim()})`,
               backgroundRepeat: "repeat",
-              backgroundSize: `${effectiveSettings.bgPatternSize}px ${effectiveSettings.bgPatternSize}px`,
-              opacity: effectiveSettings.bgPatternOpacity,
+              backgroundSize: `${settings.bgPatternSize}px ${settings.bgPatternSize}px`,
+              opacity: settings.bgPatternOpacity,
               mixBlendMode: "multiply",
             }}
           />
@@ -1156,7 +1220,7 @@ export default function Page() {
               pointerEvents: "none",
               position: "fixed",
               inset: 0,
-              background: `linear-gradient(0deg, rgba(0,0,0,${effectiveSettings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
+              background: `linear-gradient(0deg, rgba(0,0,0,${settings.bgPatternBlend * 0.06}) 0%, rgba(0,0,0,0) 70%)`,
             }}
           />
         </>
@@ -1164,13 +1228,21 @@ export default function Page() {
 
       <main style={{ maxWidth: 860, margin: "0 auto", padding: 24, paddingBottom: 86, position: "relative" }}>
         {/* 상단바 */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginBottom: 14,
+          }}
+        >
           <div>
             <h1 style={{ fontSize: 28, fontWeight: 900, margin: 0, color: textColor }}>Parody Translator</h1>
             <div style={{ fontSize: 13, opacity: 0.7, marginTop: 6 }}>자동 저장: ☰ 목록에 시간순으로 쌓임</div>
           </div>
 
-          {/* ✅ 히스토리 + 설정(아이콘) */}
+          {/* 히스토리 + 설정(아이콘) */}
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <button
               onClick={() => {
@@ -1217,7 +1289,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ✅ URL 입력 (카드 1겹 + input 무테/무배경) */}
+        {/* URL 입력 */}
         <div style={{ ...cardShellStyle, marginBottom: 12 }}>
           <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
             <input
@@ -1252,10 +1324,13 @@ export default function Page() {
         </div>
 
         {/* 텍스트 직접 번역 */}
-        <details open={manualOpen} onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)} style={{ marginBottom: 12 }}>
+        <details
+          open={manualOpen}
+          onToggle={(e) => setManualOpen((e.target as HTMLDetailsElement).open)}
+          style={{ marginBottom: 12 }}
+        >
           <summary style={{ cursor: "pointer", fontWeight: 900, opacity: 0.85 }}>텍스트 직접 번역</summary>
 
-          {/* ✅ 직접 번역 카드 1겹 */}
           <div style={{ marginTop: 10, ...cardShellStyle }}>
             <textarea
               value={source}
@@ -1263,8 +1338,8 @@ export default function Page() {
               placeholder="원문을 직접 붙여넣기"
               style={{
                 ...innerInputBase,
-                height: 220, // ✅ 고정
-                overflowY: "auto", // ✅ 내부 스크롤
+                height: 220,
+                overflowY: "auto",
                 resize: "none",
                 padding: 10,
                 whiteSpace: "pre-wrap",
@@ -1312,6 +1387,12 @@ export default function Page() {
                 </span>
               )}
             </div>
+
+            {/* ✅ Pixiv 프리셋 상태 표시(간단) */}
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.75 }}>
+              Pixiv 프리셋: <b>{settings.pixivPresetEnabled ? "ON" : "OFF"}</b>
+              {settings.pixivPresetEnabled ? " · 수동 번역에도 회차/부제목 정리 + 헤더 적용" : ""}
+            </div>
           </div>
         </details>
 
@@ -1324,15 +1405,15 @@ export default function Page() {
           <div
             style={{
               border: "1px solid rgba(0,0,0,0.18)",
-              borderRadius: effectiveSettings.viewerRadius,
-              padding: effectiveSettings.viewerPadding,
+              borderRadius: settings.viewerRadius,
+              padding: settings.viewerPadding,
               background: cardBg,
               minHeight: 240,
               whiteSpace: "pre-wrap",
-              lineHeight: effectiveSettings.lineHeight,
-              fontSize: effectiveSettings.fontSize,
+              lineHeight: settings.lineHeight,
+              fontSize: settings.fontSize,
               color: textColor,
-              fontFamily: effectiveSettings.fontFamily,
+              fontFamily: settings.fontFamily,
             }}
           >
             {!resultBody.trim() ? (
@@ -1440,213 +1521,52 @@ export default function Page() {
                 </div>
               </div>
 
-              {/* ✅ Pixiv 프리셋 토글 + 편집 */}
-              <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 12, marginTop: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                  <div>
-                    <div style={{ fontWeight: 900 }}>Pixiv 소설 전용 프리셋</div>
-                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
-                      ON이면 Pixiv용 스타일이 적용돼. (기본 설정은 그대로 저장되어 있어)
-                    </div>
+              {/* ✅ 프리셋 */}
+              <details open style={{ marginTop: 10 }}>
+                <summary style={{ cursor: "pointer", fontWeight: 900 }}>프리셋</summary>
+
+                <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
+                  <div style={{ fontWeight: 900, opacity: 0.85 }}>Pixiv 소설 프리셋</div>
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6, whiteSpace: "pre-wrap" }}>
+                    - 수동/URL 모두 적용 가능
+                    {"\n"}- 회차/부제목/본문 정리: <b>회차 → 부제목 → 본문</b>
+                    {"\n"}- 날짜/시간/작가명 같은 메타 제거(옵션)
                   </div>
 
-                  <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none" }}>
-                    <input
-                      type="checkbox"
-                      checked={pixivPresetEnabled}
-                      onChange={(e) => setPixivPresetEnabled(e.target.checked)}
-                      style={{ width: 18, height: 18 }}
-                    />
-                    <span style={{ fontWeight: 900 }}>{pixivPresetEnabled ? "ON" : "OFF"}</span>
-                  </label>
-                </div>
-
-                <details style={{ marginTop: 10 }}>
-                  <summary style={{ cursor: "pointer", fontWeight: 900 }}>Pixiv 프리셋 편집</summary>
-
-                  <div style={{ marginTop: 10, border: "1px solid #eee", borderRadius: 12, padding: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                      <div style={{ fontSize: 12, opacity: 0.7 }}>
-                        이 값은 Pixiv 프리셋에만 저장돼. {pixivDirty ? "· 변경됨" : "· 저장됨"}
-                      </div>
-
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <button
-                          onClick={undoPixivDraft}
-                          style={{
-                            height: 34,
-                            padding: "0 12px",
-                            borderRadius: 10,
-                            border: "1px solid rgba(0,0,0,0.18)",
-                            background: "#fff",
-                            fontWeight: 900,
-                          }}
-                        >
-                          되돌리기
-                        </button>
-
-                        <button
-                          onClick={resetPixivDraftToDefault}
-                          style={{
-                            height: 34,
-                            padding: "0 12px",
-                            borderRadius: 10,
-                            border: "1px solid rgba(0,0,0,0.18)",
-                            background: "#fff",
-                            fontWeight: 900,
-                          }}
-                        >
-                          기본값으로
-                        </button>
-
-                        <button
-                          onClick={savePixivDraft}
-                          disabled={!pixivDirty}
-                          style={{
-                            height: 34,
-                            padding: "0 12px",
-                            borderRadius: 10,
-                            border: "1px solid rgba(0,0,0,0.18)",
-                            fontWeight: 900,
-                            background: pixivDirty ? "#111" : "#eee",
-                            color: pixivDirty ? "#fff" : "#777",
-                            cursor: pixivDirty ? "pointer" : "not-allowed",
-                          }}
-                        >
-                          저장
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* ✅ 미리보기 (Pixiv 프리셋 draft 기준) */}
-                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>미리보기</div>
-                    <div
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+                    <button
+                      onClick={() => updateDraft({ pixivPresetEnabled: !draftSettings.pixivPresetEnabled })}
                       style={{
-                        marginTop: 8,
+                        height: 38,
+                        padding: "0 12px",
+                        borderRadius: 10,
                         border: "1px solid rgba(0,0,0,0.18)",
-                        borderRadius: effectiveDraftSettings.viewerRadius,
-                        padding: effectiveDraftSettings.viewerPadding,
-                        background: hsl(effectiveDraftSettings.cardBgH, effectiveDraftSettings.cardBgS, effectiveDraftSettings.cardBgL),
-                        color: hsl(effectiveDraftSettings.textH, effectiveDraftSettings.textS, effectiveDraftSettings.textL),
-                        lineHeight: effectiveDraftSettings.lineHeight,
-                        fontSize: effectiveDraftSettings.fontSize,
-                        fontFamily: effectiveDraftSettings.fontFamily,
+                        cursor: "pointer",
+                        fontWeight: 900,
+                        background: draftSettings.pixivPresetEnabled ? "#111" : "#fff",
+                        color: draftSettings.pixivPresetEnabled ? "#fff" : "#111",
                       }}
                     >
-                      <div style={{ fontWeight: 900, fontSize: 22 }}>미리보기 제목</div>
-                      <div style={{ opacity: 0.72, marginTop: 6 }}>제 1화 · 부제목</div>
-                      <div style={{ marginTop: 14, whiteSpace: "pre-wrap" }}>
-                        비는 새벽부터 계속 내리고 있었다.
-                        {"\n\n"}
-                        Pixiv 프리셋 편집값이 지금 화면에 바로 반영돼.
-                      </div>
-                    </div>
+                      {draftSettings.pixivPresetEnabled ? "ON" : "OFF"}
+                    </button>
 
-                    {/* 폰트 */}
-                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>폰트</div>
-                    <div style={{ marginTop: 8 }}>
-                      <select
-                        value={(pixivDraftOverrides.fontFamily as string) ?? ""}
-                        onChange={(e) => updatePixivDraft({ fontFamily: e.target.value })}
-                        style={{
-                          width: "100%",
-                          height: 40,
-                          borderRadius: 10,
-                          border: "1px solid rgba(0,0,0,0.18)",
-                          padding: "0 10px",
-                          fontWeight: 800,
-                        }}
-                      >
-                        <option value="">(Pixiv 기본 프리셋 폰트 사용)</option>
-                        <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
-                          시스템(기본)
-                        </option>
-                        <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
-                          Noto Sans KR
-                        </option>
-                        <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>Noto Serif KR / 명조</option>
-                        <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
-                          산세리프(가독)
-                        </option>
-                        <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>세리프(소설 느낌)</option>
-                        <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
-                          고정폭(모노)
-                        </option>
-                      </select>
-                    </div>
-
-                    {/* 서식 */}
-                    <LabeledSlider
-                      label="글자 크기"
-                      value={Number((pixivDraftOverrides.fontSize as number) ?? (PIXIV_PRESET_DEFAULT.fontSize as number))}
-                      min={12}
-                      max={30}
-                      onChange={(v) => updatePixivDraft({ fontSize: v })}
-                      suffix="px"
-                    />
-                    <LabeledSlider
-                      label="줄간격"
-                      value={Number((pixivDraftOverrides.lineHeight as number) ?? (PIXIV_PRESET_DEFAULT.lineHeight as number))}
-                      min={1.2}
-                      max={2.4}
-                      step={0.05}
-                      onChange={(v) => updatePixivDraft({ lineHeight: v })}
-                    />
-                    <LabeledSlider
-                      label="결과 여백"
-                      value={Number((pixivDraftOverrides.viewerPadding as number) ?? (PIXIV_PRESET_DEFAULT.viewerPadding as number))}
-                      min={8}
-                      max={42}
-                      onChange={(v) => updatePixivDraft({ viewerPadding: v })}
-                      suffix="px"
-                    />
-                    <LabeledSlider
-                      label="모서리 둥글기"
-                      value={Number((pixivDraftOverrides.viewerRadius as number) ?? (PIXIV_PRESET_DEFAULT.viewerRadius as number))}
-                      min={6}
-                      max={28}
-                      onChange={(v) => updatePixivDraft({ viewerRadius: v })}
-                      suffix="px"
-                    />
-
-                    {/* 배경 */}
-                    <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>배경(프리셋)</div>
-                    <LabeledSlider
-                      label="페이지 Hue"
-                      value={Number((pixivDraftOverrides.appBgH as number) ?? (PIXIV_PRESET_DEFAULT.appBgH as number))}
-                      min={0}
-                      max={360}
-                      onChange={(v) => updatePixivDraft({ appBgH: v })}
-                    />
-                    <LabeledSlider
-                      label="페이지 Sat"
-                      value={Number((pixivDraftOverrides.appBgS as number) ?? (PIXIV_PRESET_DEFAULT.appBgS as number))}
-                      min={0}
-                      max={100}
-                      onChange={(v) => updatePixivDraft({ appBgS: v })}
-                    />
-                    <LabeledSlider
-                      label="페이지 Light"
-                      value={Number((pixivDraftOverrides.appBgL as number) ?? (PIXIV_PRESET_DEFAULT.appBgL as number))}
-                      min={0}
-                      max={100}
-                      onChange={(v) => updatePixivDraft({ appBgL: v })}
-                    />
-
-                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>
-                      ※ 카드 배경/글자색/패턴까지 Pixiv 프리셋에서 따로 만지고 싶으면, 같은 방식으로 슬라이더를 더 붙이면 돼.
-                      (지금은 핵심만 먼저 넣어둠)
-                    </div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 900, opacity: 0.85 }}>
+                      <input
+                        type="checkbox"
+                        checked={!!draftSettings.pixivStripMeta}
+                        onChange={(e) => updateDraft({ pixivStripMeta: e.target.checked })}
+                      />
+                      메타(날짜/시간/작가명) 제거
+                    </label>
                   </div>
-                </details>
-              </div>
+                </div>
+              </details>
 
               {/* ✅ 서식 편집 */}
-              <details open style={{ marginTop: 10 }}>
+              <details style={{ marginTop: 14 }}>
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
-                  {/* ✅ 폰트 선택 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 6 }}>폰트</div>
                   <div style={{ marginTop: 8 }}>
                     <select
@@ -1678,7 +1598,6 @@ export default function Page() {
                     </select>
                   </div>
 
-                  {/* ✅ 미리보기 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 12 }}>미리보기</div>
                   <div
                     style={{
@@ -1714,7 +1633,6 @@ export default function Page() {
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>배경 편집</summary>
 
                 <div style={{ marginTop: 10 }}>
-                  {/* ✅ 배경 미리보기: sticky */}
                   <div
                     style={{
                       position: "sticky",
@@ -1788,25 +1706,21 @@ export default function Page() {
                     </div>
                   </div>
 
-                  {/* 페이지 배경 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 4 }}>페이지 배경 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.appBgH} min={0} max={360} onChange={(v) => updateDraft({ appBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.appBgS} min={0} max={100} onChange={(v) => updateDraft({ appBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.appBgL} min={0} max={100} onChange={(v) => updateDraft({ appBgL: v })} />
 
-                  {/* 카드 배경 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>결과 카드 배경 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.cardBgH} min={0} max={360} onChange={(v) => updateDraft({ cardBgH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.cardBgS} min={0} max={100} onChange={(v) => updateDraft({ cardBgS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.cardBgL} min={0} max={100} onChange={(v) => updateDraft({ cardBgL: v })} />
 
-                  {/* 글자 색 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>글자 색상</div>
                   <LabeledSlider label="Hue" value={draftSettings.textH} min={0} max={360} onChange={(v) => updateDraft({ textH: v })} />
                   <LabeledSlider label="Saturation" value={draftSettings.textS} min={0} max={100} onChange={(v) => updateDraft({ textS: v })} />
                   <LabeledSlider label="Lightness" value={draftSettings.textL} min={0} max={100} onChange={(v) => updateDraft({ textL: v })} />
 
-                  {/* 패턴 */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 14 }}>빈티지 배경 무늬(선택)</div>
                   <div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
                     오래된 종이 같은 무늬를 쓰고 싶으면 패턴 이미지 URL을 넣어줘. (없으면 비워두면 됨)
@@ -1841,7 +1755,7 @@ export default function Page() {
                 </div>
               </details>
 
-              {/* ✅ Pixiv 쿠키 등록 */}
+              {/* Pixiv 쿠키 */}
               <details style={{ marginTop: 14 }}>
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>Pixiv 쿠키</summary>
 
@@ -1853,7 +1767,7 @@ export default function Page() {
                   <textarea
                     value={draftSettings.pixivCookie}
                     onChange={(e) => updateDraft({ pixivCookie: e.target.value })}
-                    placeholder="예) PHPSESSID=...; device_token=...; ..."
+                    placeholder='예) PHPSESSID=...; device_token=...; p_ab_id_2=...;'
                     style={{
                       width: "100%",
                       minHeight: 90,
@@ -1931,8 +1845,17 @@ export default function Page() {
                 <div>
                   <div style={{ fontSize: 18, fontWeight: 900 }}>목록</div>
 
-                  {/* 상태줄 */}
-                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      opacity: 0.7,
+                      marginTop: 4,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      flexWrap: "wrap",
+                    }}
+                  >
                     <span>
                       현재 폴더: <b>{breadcrumbText}</b>
                     </span>
@@ -1980,7 +1903,7 @@ export default function Page() {
                 </button>
               </div>
 
-              {/* 상단: 전체/뒤로(아이콘만) */}
+              {/* 상단: 전체/뒤로 */}
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
                 <button
                   onClick={() => {
@@ -2170,7 +2093,7 @@ export default function Page() {
                 </>
               )}
 
-              {/* 하단 오른쪽: 선택모드일 때만 이동/삭제 버튼이 + 왼쪽에 등장 */}
+              {/* 하단 오른쪽: 선택모드일 때만 이동/삭제 */}
               <div style={{ position: "absolute", right: 14, bottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
                 {selectMode && (
                   <>
@@ -2242,7 +2165,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* + 메뉴 팝업 (fixed 레이어) */}
+        {/* + 메뉴 팝업 */}
         {historyOpen && menuOpen && menuAnchor && (
           <div
             style={{ position: "fixed", inset: 0, zIndex: 10001 }}
@@ -2435,7 +2358,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* Bottom Nav: 이전/복사/다음 */}
+        {/* Bottom Nav */}
         <div
           style={{
             position: "fixed",
@@ -2504,4 +2427,4 @@ export default function Page() {
       </main>
     </div>
   );
-}
+            }
