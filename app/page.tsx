@@ -135,6 +135,37 @@ const DEFAULT_SETTINGS: AppSettings = {
   pixivCookie: "",
 };
 
+/** ✅ Pixiv 전용 프리셋 (토글 없이 버튼 1번으로 적용) */
+const PIXIV_PRESET: Partial<AppSettings> = {
+  // 읽기 좋은 소설뷰 (모바일 포함)
+  fontSize: 16,
+  lineHeight: 1.75,
+  viewerPadding: 18,
+  viewerRadius: 14,
+
+  // 소설 느낌 폰트 우선(없으면 자동 fallback)
+  fontFamily: 'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif',
+
+  // 따뜻한 종이톤
+  appBgH: 40,
+  appBgS: 22,
+  appBgL: 94,
+
+  cardBgH: 40,
+  cardBgS: 18,
+  cardBgL: 98,
+
+  textH: 28,
+  textS: 35,
+  textL: 14,
+
+  // 패턴은 기본 비움(원하면 사용자가 넣도록)
+  bgPatternUrl: "",
+  bgPatternOpacity: 0.18,
+  bgPatternSize: 900,
+  bgPatternBlend: 0.35,
+};
+
 const SETTINGS_KEY = "parody_translator_settings_v1"; // 기존 키 유지 (충돌 방지)
 const SESSION_KEY = "parody_translator_session_v1"; // ✅ 현재 화면 상태 저장용(신규)
 
@@ -334,13 +365,13 @@ export default function Page() {
   ========================= */
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
 
-  // ✅ 설정 모달(draft) — settings 다음에 바로 선언(순서 안정화)
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [settingsDirty, setSettingsDirty] = useState(false);
-
-  // ✅ "설정을 로드한 뒤에만 저장" 가드
+  // ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
   const settingsHydratedRef = useRef(false);
+
+  // 설정 모달(draft)
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
+  const [settingsDirty, setSettingsDirty] = useState(false);
 
   // ✅ 마운트 후 1회: localStorage에서 settings 로드
   useEffect(() => {
@@ -349,7 +380,7 @@ export default function Page() {
     const loaded = loadSettings();
     setSettings(loaded);
 
-    // draft도 동기화 (초기 폰트/배경 꼬임 방지)
+    // 설정 모달 draft도 동기화 (초기 폰트/배경이 안 꼬이게)
     setDraftSettings(loaded);
     setSettingsDirty(false);
 
@@ -367,6 +398,7 @@ export default function Page() {
   }, [settings]);
 
   function openSettings() {
+    // ✅ 항상 "현재 settings"를 draft로 가져옴
     setDraftSettings(settings);
     setSettingsDirty(false);
     setSettingsOpen(true);
@@ -381,6 +413,7 @@ export default function Page() {
   }
 
   function saveDraft() {
+    // ✅ 저장 버튼을 눌렀을 때만 settings에 반영
     setSettings(draftSettings);
     try {
       saveSettings(draftSettings);
@@ -393,9 +426,14 @@ export default function Page() {
     setSettingsDirty(false);
   }
 
-  /* =========================
-     (여기부터는 네 기존 코드 그대로)
-  ========================= */
+  /** ✅ Pixiv 프리셋을 "draft"에만 적용 (저장은 사용자가 '저장' 눌러야) */
+  function applyPixivPresetToDraft() {
+    setDraftSettings((prev) => {
+      const next = { ...prev, ...PIXIV_PRESET };
+      return next;
+    });
+    setSettingsDirty(true);
+  }
 
   /* =========================
      URL 중심
@@ -563,7 +601,8 @@ export default function Page() {
     if (typeof s.resultBody === "string") setResultBody(s.resultBody);
     if (typeof s.showHeader === "boolean") setShowHeader(s.showHeader);
 
-    if (typeof s.currentHistoryId === "string" || s.currentHistoryId === null) setCurrentHistoryId(s.currentHistoryId ?? null);
+    if (typeof s.currentHistoryId === "string" || s.currentHistoryId === null)
+      setCurrentHistoryId(s.currentHistoryId ?? null);
   }, []);
 
   // ✅ 세션 자동 저장(현재 화면 상태가 안 날아가게)
@@ -1308,6 +1347,29 @@ export default function Page() {
               <details open style={{ marginTop: 10 }}>
                 <summary style={{ cursor: "pointer", fontWeight: 900 }}>서식 편집</summary>
 
+                {/* ✅ Pixiv 프리셋 버튼 (토글 없이) */}
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                  <button
+                    onClick={applyPixivPresetToDraft}
+                    style={{
+                      height: 36,
+                      padding: "0 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(0,0,0,0.18)",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                      background: "#fff",
+                    }}
+                    title="Pixiv 소설 보기용 프리셋(폰트/서식/톤) 적용"
+                  >
+                    📘 Pixiv 프리셋 적용
+                  </button>
+
+                  <div style={{ fontSize: 12, opacity: 0.7, display: "flex", alignItems: "center" }}>
+                    (적용 후 <b>저장</b> 눌러야 유지돼)
+                  </div>
+                </div>
+
                 <div style={{ marginTop: 10 }}>
                   {/* ✅ 폰트 선택 (복구) */}
                   <div style={{ fontWeight: 900, opacity: 0.85, marginTop: 6 }}>폰트</div>
@@ -1324,22 +1386,28 @@ export default function Page() {
                         fontWeight: 800,
                       }}
                     >
-                      <option value={'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                      <option
+                        value={
+                          'system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'
+                        }
+                      >
                         시스템(기본)
                       </option>
-                      <option value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}>
+                      <option
+                        value={'"Noto Sans KR", system-ui, -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif'}
+                      >
                         Noto Sans KR
                       </option>
-                      <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>
-                        Noto Serif KR / 명조
-                      </option>
+                      <option value={'"Noto Serif KR", "Nanum Myeongjo", serif'}>Noto Serif KR / 명조</option>
                       <option value={'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif'}>
                         산세리프(가독)
                       </option>
-                      <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>
-                        세리프(소설 느낌)
-                      </option>
-                      <option value={'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'}>
+                      <option value={'ui-serif, "Noto Serif KR", "Nanum Myeongjo", serif'}>세리프(소설 느낌)</option>
+                      <option
+                        value={
+                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace'
+                        }
+                      >
                         고정폭(모노)
                       </option>
                     </select>
@@ -1369,10 +1437,38 @@ export default function Page() {
                     </div>
                   </div>
 
-                  <LabeledSlider label="글자 크기" value={draftSettings.fontSize} min={12} max={30} onChange={(v) => updateDraft({ fontSize: v })} suffix="px" />
-                  <LabeledSlider label="줄간격" value={draftSettings.lineHeight} min={1.2} max={2.4} step={0.05} onChange={(v) => updateDraft({ lineHeight: v })} />
-                  <LabeledSlider label="결과 여백" value={draftSettings.viewerPadding} min={8} max={42} onChange={(v) => updateDraft({ viewerPadding: v })} suffix="px" />
-                  <LabeledSlider label="모서리 둥글기" value={draftSettings.viewerRadius} min={6} max={28} onChange={(v) => updateDraft({ viewerRadius: v })} suffix="px" />
+                  <LabeledSlider
+                    label="글자 크기"
+                    value={draftSettings.fontSize}
+                    min={12}
+                    max={30}
+                    onChange={(v) => updateDraft({ fontSize: v })}
+                    suffix="px"
+                  />
+                  <LabeledSlider
+                    label="줄간격"
+                    value={draftSettings.lineHeight}
+                    min={1.2}
+                    max={2.4}
+                    step={0.05}
+                    onChange={(v) => updateDraft({ lineHeight: v })}
+                  />
+                  <LabeledSlider
+                    label="결과 여백"
+                    value={draftSettings.viewerPadding}
+                    min={8}
+                    max={42}
+                    onChange={(v) => updateDraft({ viewerPadding: v })}
+                    suffix="px"
+                  />
+                  <LabeledSlider
+                    label="모서리 둥글기"
+                    value={draftSettings.viewerRadius}
+                    min={6}
+                    max={28}
+                    onChange={(v) => updateDraft({ viewerRadius: v })}
+                    suffix="px"
+                  />
                 </div>
               </details>
 
@@ -1502,9 +1598,31 @@ export default function Page() {
                     </button>
                   </div>
 
-                  <LabeledSlider label="무늬 투명도" value={draftSettings.bgPatternOpacity} min={0} max={1} step={0.01} onChange={(v) => updateDraft({ bgPatternOpacity: v })} />
-                  <LabeledSlider label="무늬 크기" value={draftSettings.bgPatternSize} min={120} max={1600} step={10} onChange={(v) => updateDraft({ bgPatternSize: v })} suffix="px" />
-                  <LabeledSlider label="무늬 강조" value={draftSettings.bgPatternBlend} min={0} max={1} step={0.01} onChange={(v) => updateDraft({ bgPatternBlend: v })} />
+                  <LabeledSlider
+                    label="무늬 투명도"
+                    value={draftSettings.bgPatternOpacity}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    onChange={(v) => updateDraft({ bgPatternOpacity: v })}
+                  />
+                  <LabeledSlider
+                    label="무늬 크기"
+                    value={draftSettings.bgPatternSize}
+                    min={120}
+                    max={1600}
+                    step={10}
+                    onChange={(v) => updateDraft({ bgPatternSize: v })}
+                    suffix="px"
+                  />
+                  <LabeledSlider
+                    label="무늬 강조"
+                    value={draftSettings.bgPatternBlend}
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    onChange={(v) => updateDraft({ bgPatternBlend: v })}
+                  />
                 </div>
               </details>
 
