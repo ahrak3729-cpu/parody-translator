@@ -4,6 +4,9 @@ import { Readability } from "@mozilla/readability";
 
 export const runtime = "nodejs";
 
+/** -------------------------
+ *  Helpers
+ *  ------------------------- */
 function isPixiv(url: string) {
   try {
     const u = new URL(url);
@@ -13,17 +16,19 @@ function isPixiv(url: string) {
   }
 }
 
-function getPixivNovelId(u: URL): string | null {
-  // 1) https://www.pixiv.net/novel/show.php?id=10461103
-  const id = u.searchParams.get("id");
-  if (id && /^\d+$/.test(id)) return id;
+function isPixivNovelShow(u: URL) {
+  // 대표 케이스: https://www.pixiv.net/novel/show.php?id=10461103
+  return u.hostname.includes("pixiv.net") && u.pathname === "/novel/show.php" && !!u.searchParams.get("id");
+}
 
-  // 2) 혹시 다른 형태가 들어오면 대비 (미래 대비용)
-  //    예: /novel/show/10461103 같은 형태가 생길 수 있어서 숫자만 추출 시도
-  const m = u.pathname.match(/(\d{6,})/);
-  if (m?.[1]) return m[1];
-
-  return null;
+function buildCommonHeaders() {
+  return {
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
+    "accept-language": "ko-KR,ko;q=0.9,en;q=0.8",
+    // Pixiv AJAX는 이거 있으면 성공률이 약간 올라가
+    "x-requested-with": "XMLHttpRequest",
+  } as Record<string, string>;
 }
 
 async function safeReadJson(res: Response) {
@@ -32,14 +37,6 @@ async function safeReadJson(res: Response) {
 
   if (!raw.trim()) return { __raw: "", __notJson: true, __contentType: contentType };
 
-  if (contentType.includes("application/json")) {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return { __raw: raw, __notJson: true, __contentType: contentType };
-    }
-  }
-
   try {
     return JSON.parse(raw);
   } catch {
@@ -47,6 +44,169 @@ async function safeReadJson(res: Response) {
   }
 }
 
+/** -------------------------
+ *  Pixiv Novel Extract (AJAX API)
+ *  - 분할 소설 포함: pages를 합쳐서 반환
+ *  ------------------------- */
+async function extractPixivNovel(u: URL, cookie: string) {
+  const novelId = u.searchParams.get("id")!;
+  const headers = buildCommonHeaders();
+
+  const c = (cookie || "").trim();
+  if (!c) {
+    return {
+      ok: false as const,
+      status: 401,
+      body: {
+        error: "Pixiv 본문을 불러오려면 로그인 쿠키가 필요해요.\n설정에서 Pixiv 쿠키를 붙여넣고 다시 시도해줘.",
+        code: "PIXIV_COOKIE_REQUIRED",
+      },
+    };
+  }
+
+  // Pixiv AJAX는 보통 referer/origin/cookie가 중요
+  headers["cookie"] = c;
+  headers["referer"] = `https://www.pixiv.net/novel/show.php?id=${encodeURIComponent(novelId)}`;
+  headers["origin"] = "https://www.pixiv.net";
+  headers["accept"] = "application/json, text/plain, */*";
+
+  // 1) 메타(제목 등) 가져오기
+  const metaRes = await fetch(`https://www.pixiv.net/ajax/novel/${encodeURIComponent(novelId)}`, {
+    headers,
+  });
+  const metaJson: any = await safeReadJson(metaRes);
+
+  if (!metaRes.ok) {
+    // 쿠키 만료/권한/차단 등
+    return {
+      ok: false as const,
+      status: metaRes.status,
+      body: {
+        error: `Pixiv 메타 가져오기 실패: ${metaRes.status} ${metaRes.statusText}\n(쿠키 만료/권한/차단 가능)`,
+        code: "PIXIV_META_FETCH_FAILED",
+        detail: metaJson?.error || metaJson?.message || undefined,
+      },
+    };
+  }
+
+  const title =
+    String(metaJson?.body?.title ?? "").trim() ||
+    String(metaJson?.body?.novelTitle ?? "").trim() ||
+    "";
+
+  // 2) pages 가져오기 (페이지 분할/단일 모두 여기서 텍스트 얻는 게 제일 안정적)
+  const pagesRes = await fetch(`https://www.pixiv.net/ajax/novel/${encodeURIComponent(novelId)}/pages`, {
+    headers,
+  });
+  const pagesJson: any = await safeReadJson(pagesRes);
+
+  if (!pagesRes.ok) {
+    return {
+      ok: false as const,
+      status: pagesRes.status,
+      body: {
+        error: `Pixiv 페이지 가져오기 실패: ${pagesRes.status} ${pagesRes.statusText}\n(쿠키 만료/권한/차단 가능)`,
+        code: "PIXIV_PAGES_FETCH_FAILED",
+        detail: pagesJson?.error || pagesJson?.message || undefined,
+      },
+    };
+  }
+
+  // Pixiv 응답 구조가 바뀔 수 있어서 최대한 방어적으로 처리
+  // 흔한 형태:
+  // { body: [ { text: "..." }, { text: "..." } ] } 또는
+  // { body: { pages: [ { text: "..." } ] } } 또는
+  // { body: { content: "..." } } (단일일 때)
+  let text = "";
+
+  const body = pagesJson?.body;
+
+  if (Array.isArray(body)) {
+    // body가 배열인 경우: pages 배열로 취급
+    const parts = body
+      .map((p: any) => (p?.text ?? p?.content ?? "").toString())
+      .map((s: string) => s.trim())
+      .filter(Boolean);
+    text = parts.join("\n\n");
+  } else if (body && Array.isArray(body.pages)) {
+    const parts = body.pages
+      .map((p: any) => (p?.text ?? p?.content ?? "").toString())
+      .map((s: string) => s.trim())
+      .filter(Boolean);
+    text = parts.join("\n\n");
+  } else if (body?.content) {
+    text = String(body.content || "").trim();
+  } else if (body?.text) {
+    text = String(body.text || "").trim();
+  }
+
+  if (!text) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error:
+          "Pixiv 본문을 추출하지 못했어요.\n- 쿠키가 만료됐거나\n- 비공개/연령 제한/권한 제한이 있거나\n- Pixiv 구조 변경으로 pages 응답 파싱이 실패했을 수 있어요.\n텍스트 직접 붙여넣기도 함께 준비해두는 걸 추천해.",
+        code: "PIXIV_EXTRACT_EMPTY",
+      },
+    };
+  }
+
+  return {
+    ok: true as const,
+    status: 200,
+    body: { title, text },
+  };
+}
+
+/** -------------------------
+ *  Generic Extract (Readability)
+ *  ------------------------- */
+async function extractGeneric(url: string) {
+  const headers = buildCommonHeaders();
+  const res = await fetch(url, { headers });
+
+  if (!res.ok) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: { error: `가져오기 실패: ${res.status} ${res.statusText}` },
+    };
+  }
+
+  const html = await res.text();
+  const dom = new JSDOM(html, { url });
+  const reader = new Readability(dom.window.document);
+  const article = reader.parse();
+
+  const text =
+    (article?.textContent ?? "").trim() ||
+    dom.window.document.body?.textContent?.replace(/\n{3,}/g, "\n\n").trim() ||
+    "";
+
+  const title =
+    (article?.title ?? "").trim() ||
+    dom.window.document.querySelector("title")?.textContent?.trim() ||
+    "";
+
+  if (!text) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error:
+          "본문을 추출하지 못했어요.\n- 사이트가 JS로 렌더링되거나\n- 차단/권한 문제이거나\n- 구조가 Readability로는 잡히지 않을 수 있어요.\n텍스트 직접 붙여넣기로도 시도해줘.",
+        code: "EXTRACT_EMPTY",
+      },
+    };
+  }
+
+  return { ok: true as const, status: 200, body: { title, text } };
+}
+
+/** -------------------------
+ *  Route
+ *  ------------------------- */
 export async function POST(req: Request) {
   try {
     const { url, cookie } = (await req.json()) as { url?: string; cookie?: string };
@@ -59,141 +219,15 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "올바른 URL 형식이 아니에요." }, { status: 400 });
     }
 
-    // 공통 헤더
-    const headers: Record<string, string> = {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36",
-      "accept-language": "ko-KR,ko;q=0.9,en;q=0.8",
-    };
-
-    // =========================
-    // ✅ Pixiv: AJAX API로 본문 추출 (안정)
-    // =========================
-    if (isPixiv(parsed.toString())) {
-      const c = (cookie || "").trim();
-      if (!c) {
-        return NextResponse.json(
-          {
-            error:
-              "Pixiv 본문을 불러오려면 로그인 쿠키가 필요해요.\n설정에서 Pixiv 쿠키를 붙여넣고 다시 시도해줘.",
-            code: "PIXIV_COOKIE_REQUIRED",
-          },
-          { status: 401 }
-        );
-      }
-
-      const novelId = getPixivNovelId(parsed);
-      if (!novelId) {
-        return NextResponse.json(
-          { error: "Pixiv 소설 id를 URL에서 찾지 못했어요. (예: ...show.php?id=12345 형태인지 확인)" },
-          { status: 400 }
-        );
-      }
-
-      // Pixiv AJAX endpoint
-      const apiUrl = `https://www.pixiv.net/ajax/novel/${novelId}`;
-
-      const pixivHeaders: Record<string, string> = {
-        ...headers,
-        cookie: c,
-        referer: "https://www.pixiv.net/",
-        origin: "https://www.pixiv.net",
-        accept: "application/json, text/plain, */*",
-      };
-
-      const res = await fetch(apiUrl, { headers: pixivHeaders });
-
-      if (!res.ok) {
-        return NextResponse.json(
-          { error: `Pixiv AJAX 가져오기 실패: ${res.status} ${res.statusText}` },
-          { status: 400 }
-        );
-      }
-
-      const data: any = await safeReadJson(res);
-
-      // Pixiv AJAX는 보통 { error: false, body: {...} } 형태
-      if (!data || data.__notJson) {
-        return NextResponse.json(
-          {
-            error:
-              "Pixiv 응답을 JSON으로 받지 못했어요.\n- 쿠키 만료/차단\n- Pixiv 측 보호\n- 네트워크 문제 가능",
-            code: "PIXIV_JSON_FAIL",
-          },
-          { status: 400 }
-        );
-      }
-
-      if (data.error === true) {
-        return NextResponse.json(
-          {
-            error: data.message || "Pixiv에서 error=true 응답이 왔어요. (비공개/연령제한/권한 문제 가능)",
-            code: "PIXIV_ERROR_TRUE",
-          },
-          { status: 400 }
-        );
-      }
-
-      const title = String(data?.body?.title ?? "").trim();
-
-      // 핵심: 본문
-      // 대부분 content에 들어옴 (개행 포함)
-      const text = String(data?.body?.content ?? "").replace(/\r\n/g, "\n").trim();
-
-      if (!text) {
-        return NextResponse.json(
-          {
-            error:
-              "Pixiv에서 본문(content)을 못 가져왔어요.\n- 성인/비공개 제한\n- 쿠키 권한 부족\n- Pixiv 구조 변경 가능",
-            code: "EXTRACT_EMPTY",
-          },
-          { status: 400 }
-        );
-      }
-
-      return NextResponse.json({ title, text });
+    // ✅ Pixiv 분기: novel/show.php?id=... 은 AJAX API로 처리
+    if (isPixiv(parsed.toString()) && isPixivNovelShow(parsed)) {
+      const r = await extractPixivNovel(parsed, cookie || "");
+      return NextResponse.json(r.body, { status: r.status });
     }
 
-    // =========================
-    // ✅ Non-Pixiv: 기존 Readability 방식
-    // =========================
-    const res = await fetch(parsed.toString(), { headers });
-
-    if (!res.ok) {
-      return NextResponse.json(
-        { error: `가져오기 실패: ${res.status} ${res.statusText}` },
-        { status: 400 }
-      );
-    }
-
-    const html = await res.text();
-
-    const dom = new JSDOM(html, { url: parsed.toString() });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-
-    const text =
-      (article?.textContent ?? "").trim() ||
-      dom.window.document.body?.textContent?.replace(/\n{3,}/g, "\n\n").trim() ||
-      "";
-
-    const title =
-      (article?.title ?? "").trim() ||
-      dom.window.document.querySelector("title")?.textContent?.trim() ||
-      "";
-
-    if (!text) {
-      return NextResponse.json(
-        {
-          error:
-            "본문을 추출하지 못했어요.\n사이트 구조/권한/차단 문제일 수 있어요.\n텍스트 직접 붙여넣기도 함께 준비해두는 걸 추천해.",
-          code: "EXTRACT_EMPTY",
-        },
-        { status: 400 }
-      );
-    }
-
-    return NextResponse.json({ title, text });
+    // ✅ 그 외는 일반 Readability 추출
+    const r = await extractGeneric(parsed.toString());
+    return NextResponse.json(r.body, { status: r.status });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "알 수 없는 오류" }, { status: 500 });
   }
