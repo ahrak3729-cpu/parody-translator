@@ -3,7 +3,8 @@
 // (기존 구현에 "prompt"만 끼워 넣는 구조로 설계)
 
 import { NextResponse } from "next/server";
-import { TRANSLATION_SYSTEM_PROMPT, buildUserPrompt } from "@/lib/translationPrompt";
+import { TRANSLATION_SYSTEM_PROMPT, buildUserPrompt } 
+  from "../../../../lib/translationPrompt";
 
 /** ✅ 대사 위/아래 빈 줄 강제 */
 function normalizeDialogueSpacing(text: string) {
