@@ -1,9 +1,11 @@
 // app/api/translate/route.ts
 // ✅ 프롬프트를 강하게 고정 + 최소 후처리(서식 강제)
-// (기존 구현에 "prompt"만 끼워 넣는 구조로 설계)
+// - 대사 위/아래 빈 줄 강제
+// - 회차/부제목(헤더) 다음 본문 간격 늘리기
+// - 각 줄 끝 공백 1칸 강제
 
 import { NextResponse } from "next/server";
-import { TRANSLATION_SYSTEM_PROMPT, buildUserPrompt } from "@/lib/translationPrompt";
+import { TRANSLATION_SYSTEM_PROMPT, buildUserPrompt } from "../../../lib/translationPrompt";
 
 /** ✅ 대사 위/아래 빈 줄 강제 */
 function normalizeDialogueSpacing(text: string) {
@@ -35,6 +37,49 @@ function normalizeDialogueSpacing(text: string) {
   return out.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
 }
 
+/** ✅ 회차/부제목/헤더 다음에 본문과 간격(빈 줄) 추가 */
+function addSpacingAfterHeaders(text: string) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const out: string[] = [];
+
+  const isHeader = (line: string) => {
+    const t = line.trim();
+    if (!t) return false;
+
+    // 번호/회차류
+    if (/^#\d+/.test(t)) return true;
+    if (/^제?\s*\d+\s*화/.test(t)) return true;
+
+    // 영문 타이틀(짧은 줄만): Side Fate 같은 헤더를 잡기 위함
+    // (너무 넓게 잡으면 본문도 걸리니까 길이 제한)
+    if (t.length <= 30 && /^[A-Za-z0-9 _\-·:]+$/.test(t)) return true;
+
+    return false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const cur = lines[i] ?? "";
+    out.push(cur);
+
+    if (isHeader(cur)) {
+      const next = lines[i + 1] ?? "";
+      const next2 = lines[i + 2] ?? "";
+
+      // 헤더 다음 줄이 바로 본문이면 빈 줄 2개 확보
+      if (next.trim() !== "") {
+        out.push("");
+        out.push("");
+      } else if (next.trim() === "" && next2.trim() !== "") {
+        // 이미 1줄 비어있으면 +1줄만
+        out.push("");
+      }
+    }
+  }
+
+  // 과도한 빈 줄은 정리
+  return out.join("\n").replace(/\n{5,}/g, "\n\n\n\n").trimEnd();
+}
+
 /** ✅ “문장 끝 공백 1칸” 강제: 각 줄 끝에 공백 1칸 부여 */
 function ensureTrailingSpacePerLine(text: string) {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
@@ -44,8 +89,9 @@ function ensureTrailingSpacePerLine(text: string) {
     // 이미 끝이 공백이면 그대로, 아니면 공백 1칸 추가
     return l.endsWith(" ") ? l : l + " ";
   });
-  // 문서 마지막도 공백 1칸 유지
+
   const joined = out.join("\n");
+  // 문서 마지막도 공백 1칸 유지
   return joined.endsWith(" ") ? joined : joined + " ";
 }
 
@@ -55,23 +101,25 @@ export async function POST(req: Request) {
     const input = String(text ?? "").trim();
     if (!input) return NextResponse.json({ translated: "" });
 
-    // 🔽 여기 아래는 "네가 이미 쓰고 있는 OpenAI 호출 코드"에 맞춰 붙이면 됨
-    // 예시: fetch 기반(OpenAI Responses API든 Chat Completions든) — 핵심은 system/user prompt 구성.
-    const openaiRes = await fetch(process.env.OPENAI_API_URL ?? "https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-        temperature: 0.2,
-        messages: [
-          { role: "system", content: TRANSLATION_SYSTEM_PROMPT },
-          { role: "user", content: buildUserPrompt(input) },
-        ],
-      }),
-    });
+    // ✅ 네가 쓰는 방식 유지: 기본은 Chat Completions endpoint (환경변수로 변경 가능)
+    const openaiRes = await fetch(
+      process.env.OPENAI_API_URL ?? "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: TRANSLATION_SYSTEM_PROMPT },
+            { role: "user", content: buildUserPrompt(input) },
+          ],
+        }),
+      }
+    );
 
     if (!openaiRes.ok) {
       const raw = await openaiRes.text().catch(() => "");
@@ -82,15 +130,18 @@ export async function POST(req: Request) {
     }
 
     const data = await openaiRes.json();
+
+    // Chat Completions 형태 우선 + (혹시 다른 형태 대비)
     const translatedRaw =
       data?.choices?.[0]?.message?.content ??
-      data?.output_text ?? // 혹시 Responses API 형태를 쓰는 경우 대비
+      data?.output_text ??
       "";
 
     let translated = String(translatedRaw ?? "");
 
     // ✅ 최소 후처리(서식 강제)
     translated = normalizeDialogueSpacing(translated);
+    translated = addSpacingAfterHeaders(translated);
     translated = ensureTrailingSpacePerLine(translated);
 
     return NextResponse.json({ translated });
