@@ -4,7 +4,7 @@
 
 import { NextResponse } from "next/server";
 import { TRANSLATION_SYSTEM_PROMPT, buildUserPrompt } 
-  from "../../../../../lib/translationPrompt";
+  from "@/lib/translationPrompt";
 
 /** ✅ 대사 위/아래 빈 줄 강제 */
 function normalizeDialogueSpacing(text: string) {
