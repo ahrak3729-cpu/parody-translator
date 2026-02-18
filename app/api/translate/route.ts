@@ -40,39 +40,31 @@ function ensureTrailingSpacePerLine(text: string) {
     .join("\n");
 }
 
-/** ✅ 원문 상단 회차 표식 추출: "#1/#01", "第1話", "제 1화" */
+/** ✅ 원문 상단에서 회차 표식 추출: "#1/#01" 또는 "第1話" */
 function extractLeadingEpisodeMarker(source: string) {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   for (let i = 0; i < Math.min(lines.length, 12); i++) {
     const t = (lines[i] ?? "").trim();
     if (!t) continue;
 
-    // "#1" "#01"
-    const mHash = t.match(/^#(\d{1,4})$/);
+    const mHash = t.match(/^#(\d{1,4})$/); // #1, #01
     if (mHash) return { kind: "hash" as const, n: parseInt(mHash[1], 10), raw: t };
 
-    // "第1話"
-    const mJp = t.match(/^第\s*(\d+)\s*話$/);
+    const mJp = t.match(/^第\s*(\d+)\s*話$/); // 第1話
     if (mJp) return { kind: "jp" as const, n: parseInt(mJp[1], 10), raw: t };
 
-    // "제 1화"
-    const mKo = t.match(/^제\s*(\d+)\s*화$/);
-    if (mKo) return { kind: "ko" as const, n: parseInt(mKo[1], 10), raw: t };
-
-    // 첫 의미있는 줄이 회차가 아니면 중단
-    break;
+    break; // 첫 의미있는 줄이 회차가 아니면 중단
   }
   return null;
 }
 
-function toKoreanEpisodeHeader(n: number) {
-  return `제 ${n}화`;
-}
-
-/** ✅ "제 N화" / "第N話" / "#N" 라인 판별 */
+/** ✅ 번역 결과에서 회차 라인 판별 */
 function parseEpisodeHeaderLine(line: string) {
   const t = line.trim();
   if (!t) return null;
+
+  const mHash = t.match(/^#(\d{1,4})$/);
+  if (mHash) return { kind: "hash" as const, n: parseInt(mHash[1], 10), raw: t };
 
   const mKo = t.match(/^제\s*(\d+)\s*화$/);
   if (mKo) return { kind: "ko" as const, n: parseInt(mKo[1], 10), raw: t };
@@ -80,26 +72,26 @@ function parseEpisodeHeaderLine(line: string) {
   const mJp = t.match(/^第\s*(\d+)\s*話$/);
   if (mJp) return { kind: "jp" as const, n: parseInt(mJp[1], 10), raw: t };
 
-  const mHash = t.match(/^#(\d{1,4})$/);
-  if (mHash) return { kind: "hash" as const, n: parseInt(mHash[1], 10), raw: t };
-
   const mBare = t.match(/^(\d+)\s*화$/);
   if (mBare) return { kind: "bare" as const, n: parseInt(mBare[1], 10), raw: t };
 
   return null;
 }
 
+function toKoreanEpisodeHeader(n: number) {
+  return `제 ${n}화`;
+}
+
 /**
- * ✅ 핵심 후처리:
- * - 원문이 "#1/#01"이면 결과 상단 회차는 "제 1화"로 통일
- * - 결과에 "#1"과 "제 1화"가 같이 있으면 "#1" 제거(중복 방지)
- * - 원문이 第1話/제1화여도 결과는 "제 1화"로 유지(중복 제거만)
+ * ✅ 핵심 후처리(너가 원하는 규칙 그대로)
+ * - 원문이 "#1/#01"이면: 번역 결과 상단의 회차는 반드시 "#1/#01" 그대로 유지
+ *   + 모델이 "제 1화"를 추가로 만들어도 같은 숫자면 제거(중복 방지)
+ * - 원문이 "第1話"이면: 번역 결과 상단 회차는 "제 1화"로 통일
+ *   + 중복 회차(제 1화가 두 번 등) 제거
  */
-function normalizeEpisodeHeaderBySource(source: string, translated: string) {
+function normalizeEpisodeBySource(source: string, translated: string) {
   const src = extractLeadingEpisodeMarker(source);
   if (!src || !Number.isFinite(src.n)) return translated;
-
-  const targetHeader = toKoreanEpisodeHeader(src.n);
 
   const lines = translated.replace(/\r\n/g, "\n").split("\n");
 
@@ -107,43 +99,66 @@ function normalizeEpisodeHeaderBySource(source: string, translated: string) {
   let i = 0;
   while (i < lines.length && lines[i].trim() === "") i++;
 
-  // 상단 1~4줄 정도에서 회차 라인들을 모아서 중복 정리
-  // 케이스:
-  // 1) ["제 1화", "#1", ...] -> "#1" 제거
-  // 2) ["#1", "제 1화", ...] -> "#1" 제거 + "제 1화" 유지
-  // 3) ["#1", ...] -> "#1"을 "제 1화"로 치환
-  // 4) ["第1話", ...] -> "제 1화"로 치환
+  // 상단에서 회차 라인을 최대 3개까지 수집(중복 제거용)
+  const idxs: number[] = [];
+  for (let k = i; k < Math.min(lines.length, i + 5); k++) {
+    const p = parseEpisodeHeaderLine(lines[k] ?? "");
+    if (p && p.n === src.n) idxs.push(k);
+  }
 
-  // 첫 회차 라인 찾기
-  const first = i < lines.length ? parseEpisodeHeaderLine(lines[i]) : null;
-  const second = i + 1 < lines.length ? parseEpisodeHeaderLine(lines[i + 1]) : null;
-
-  // (A) 첫 줄이 회차면 표준화
-  if (first && first.n === src.n) {
-    // "#1" or "第1話" or "1화" -> "제 1화"
-    if (lines[i].trim() !== targetHeader) {
-      lines[i] = targetHeader;
+  // --- CASE A: 원문이 #1/#01 => 결과도 첫 회차는 반드시 "#1/#01" ---
+  if (src.kind === "hash") {
+    // 1) 첫 의미있는 줄이 회차면 "#..."로 강제
+    const firstParsed = i < lines.length ? parseEpisodeHeaderLine(lines[i]) : null;
+    if (firstParsed && firstParsed.n === src.n) {
+      if (lines[i].trim() !== src.raw) lines[i] = src.raw;
+    } else {
+      // 첫 줄이 회차가 아니면 맨 위에 삽입(원문이 회차로 시작했는데 모델이 날린 케이스 대비)
+      lines.splice(i, 0, src.raw);
     }
 
-    // (B) 다음 줄이 같은 회차를 또 가지고 있으면 제거
-    if (second && second.n === src.n) {
-      // 두 번째가 "#1" 같은 중복이면 제거
-      lines.splice(i + 1, 1);
-      // 뒤 공백 정리(최대 2개)
-      let k = i + 1;
-      let removed = 0;
-      while (k < lines.length && lines[k].trim() === "" && removed < 2) {
+    // 2) 같은 숫자의 다른 회차 표식("제 1화"/"第1話"/"1화"/또는 중복 "#1") 제거
+    //    단, 첫 줄(#...)은 남기고 그 아래 동일 회차 라인들 삭제
+    let removed = 0;
+    for (let k = i + 1; k < Math.min(lines.length, i + 8); k++) {
+      const p = parseEpisodeHeaderLine(lines[k] ?? "");
+      if (p && p.n === src.n) {
+        // 중복 삭제
         lines.splice(k, 1);
+        k--;
         removed++;
+        if (removed >= 3) break;
       }
     }
 
     return lines.join("\n").trimStart();
   }
 
-  // (C) 첫 줄이 회차가 아니지만, 두 번째 줄이 회차인 경우도 보정(드물게 앞에 빈줄/기타가 끼는 케이스)
-  if (!first && second && second.n === src.n) {
-    lines[i + 1] = targetHeader;
+  // --- CASE B: 원문이 第1話 => 결과 상단을 "제 1화"로 통일 ---
+  if (src.kind === "jp") {
+    const target = toKoreanEpisodeHeader(src.n);
+
+    // 첫 의미있는 줄이 회차면 표준화
+    const firstParsed = i < lines.length ? parseEpisodeHeaderLine(lines[i]) : null;
+    if (firstParsed && firstParsed.n === src.n) {
+      if (lines[i].trim() !== target) lines[i] = target;
+    } else {
+      // 원문이 회차로 시작했는데 모델이 날린 경우 대비
+      lines.splice(i, 0, target);
+    }
+
+    // 중복 회차 제거(같은 숫자)
+    let removed = 0;
+    for (let k = i + 1; k < Math.min(lines.length, i + 8); k++) {
+      const p = parseEpisodeHeaderLine(lines[k] ?? "");
+      if (p && p.n === src.n) {
+        lines.splice(k, 1);
+        k--;
+        removed++;
+        if (removed >= 3) break;
+      }
+    }
+
     return lines.join("\n").trimStart();
   }
 
@@ -158,7 +173,7 @@ function widenHeaderToBodyGap(text: string) {
     const t = line.trim();
     if (!t) return false;
 
-    // 회차
+    // 회차 라인
     if (parseEpisodeHeaderLine(t)) return true;
 
     // 부제목 후보: 짧고 종결부호로 끝나지 않으면 헤더 취급
@@ -190,13 +205,13 @@ function widenHeaderToBodyGap(text: string) {
 
   if (headerCount === 0 || end >= lines.length) return text;
 
-  // end 직전 공백 제거
+  // 헤더 끝 직전의 공백은 제거
   while (end > 0 && lines[end - 1].trim() === "") {
     lines.splice(end - 1, 1);
     end--;
   }
 
-  // 본문 앞에 빈 줄 2개(간격 넓힘)
+  // 본문 앞에 빈 줄 2개(간격 확실히 넓힘)
   lines.splice(end, 0, "", "");
 
   return lines.join("\n").replace(/\n{5,}/g, "\n\n\n\n").trimEnd();
@@ -218,7 +233,7 @@ export async function POST(req: Request) {
         },
         body: JSON.stringify({
           model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-          temperature: 0.2,
+          temperature: 0.1, // ✅ 번역 흔들림 줄이기(오류 체감 줄어듦)
           messages: [
             { role: "system", content: TRANSLATION_SYSTEM_PROMPT },
             { role: "user", content: buildUserPrompt(input) },
@@ -243,8 +258,8 @@ export async function POST(req: Request) {
 
     translated = String(translated ?? "");
 
-    // ✅ 1) 회차 헤더를 "원문 규칙"에 맞춰 정규화 + 중복 제거
-    translated = normalizeEpisodeHeaderBySource(input, translated);
+    // ✅ 1) 회차 표식 규칙 적용 + 중복 제거
+    translated = normalizeEpisodeBySource(input, translated);
 
     // ✅ 2) 서식 후처리
     translated = normalizeDialogueSpacing(translated);
