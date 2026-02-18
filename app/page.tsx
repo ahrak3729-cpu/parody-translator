@@ -56,6 +56,8 @@ type HistoryItem = {
 
   // ✅ 회차가 원문에 없으면 null (임의로 1화 생성 금지)
   episodeNo: number | null;
+  // ✅ 원문 회차 표식(헤더 표시용): "#01" 같은 원문 그대로 / 第1話는 "제 1화"로 저장
+  episodeHeader: string;
 
   // 원문 부제목/제목(저장용)
   subtitle: string;
@@ -212,6 +214,12 @@ function loadHistory(): HistoryItem[] {
           createdAt: Number((x as any).createdAt) || Date.now(),
           seriesTitle: typeof (x as any).seriesTitle === "string" ? (x as any).seriesTitle : "",
           episodeNo: ep,
+           episodeHeader:
+            typeof (x as any).episodeHeader === "string"
+              ? (x as any).episodeHeader
+              : ep != null
+              ? `제 ${ep}화`
+              : "",
           subtitle: typeof (x as any).subtitle === "string" ? (x as any).subtitle : "",
           translatedSubtitle:
             typeof (x as any).translatedSubtitle === "string" ? (x as any).translatedSubtitle : undefined,
@@ -351,6 +359,7 @@ type AppSession = {
 
   seriesTitle: string;
   episodeNo: number | null;
+   episodeHeader: string;
   subtitle: string;
   translatedSubtitle: string;
 
@@ -406,24 +415,34 @@ function looksLikeAuthorLine(line: string) {
   return false;
 }
 
-// ✅ Side 계열(부제목 후보 제외)
-function isSideLabel(s: string) {
-  return /^side(\s+(fate|out))?$/i.test(s.trim());
-}
-
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
-  // "#1", "1話", "1화", "第1話", "제 1화"
-  const m =
-    s.match(/^#\s*(\d{1,4})\b/) ||
-    s.match(/^(?:第|제)?\s*(\d{1,4})\s*(?:話|화)\b/) ||
-    s.match(/^(\d{1,4})\s*(?:話|화)\b/);
-
-  if (m && m[1]) {
+  // ✅ 단독 회차 표식만 인정 (뒤에 텍스트가 붙으면 회차로 보지 않음)
+  // "#1" / "#01"
+  let m = s.match(/^#\s*(\d{1,4})\s*$/);
+  if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
   }
+
+  // "第1話"
+  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
+  }
+
+  // "제 1화" / "1화"
+  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
+  }
+
   return null;
 }
 
@@ -447,8 +466,9 @@ function pickSubtitleFromLine(line: string): string | null {
   const cand = (parts[0] || "").trim();
   if (!cand) return null;
 
-  // ✅ Side 계열은 부제목 후보에서 제외
-  if (isSideLabel(cand)) return null;
+  // ✅ "Fate," 같이 끝이 쉼표/콜론/유사 문장부호면 제목으로 보지 않음
+  // (Pixiv에서 "#1 Fate," 같은 라인이 많아서 오인식 방지)
+  if (/[,:，：]$/.test(cand)) return null;
 
   // 문장형은 제외
   if (/[。.!?]$/.test(cand)) return null;
@@ -745,6 +765,7 @@ export default function Page() {
 
     if (typeof s.episodeNo === "number") setEpisodeNo(Math.max(1, Math.floor(s.episodeNo)));
     else if (s.episodeNo === null) setEpisodeNo(null);
+    if (typeof s.episodeHeader === "string") setEpisodeHeader(s.episodeHeader || "");
 
     if (typeof s.subtitle === "string") setSubtitle(s.subtitle || "");
     if (typeof s.translatedSubtitle === "string") setTranslatedSubtitle(s.translatedSubtitle || "");
@@ -766,6 +787,7 @@ export default function Page() {
         manualOpen,
         seriesTitle,
         episodeNo,
+        episodeHeader,
         subtitle,
         translatedSubtitle,
         source,
@@ -780,6 +802,7 @@ export default function Page() {
     manualOpen,
     seriesTitle,
     episodeNo,
+    episodeHeader,
     subtitle,
     translatedSubtitle,
     source,
