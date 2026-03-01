@@ -8,7 +8,14 @@ export async function POST(req: Request) {
     if (typeof text !== "string" || !text.trim()) {
       return NextResponse.json({ translatedText: "" });
     }
-
+const test = await fetch("/api/google-translate", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ text: "エドモン・ダンテス", source: "ja", target: "ko" }),
+});
+const testData = await test.json();
+console.log("google test:", testData);
+    
     // 비공식(무료) Google Translate endpoint
     // 막히면 429/403 등 날 수 있음
     const url =
