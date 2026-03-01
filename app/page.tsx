@@ -1179,8 +1179,8 @@ useEffect(() => {
     // ✅ 작업용 변수 (원문에서 추출 못하면 null 유지)
     let workingText = rawText;
     let nextEpisodeNo: number | null = null; // 🔥 임의 1화 생성 금지
-    let nextEpisodeHeader = ""; // ✅ 원문 회차 헤더(#01 등) 저장용
-    let nextEpisodeHeader = ""; // ✅ 표시용 회차 표식(원문 그대로)
+    let nextEpisodeHeader = ""; // 원문 회차 헤더(#01 등) 저장용
+    let nextEpisodeHeader = ""; // 표시용 회차 표식(원문 그대로)
     let nextEpisodeHeader = "";
     let nextSubtitle = "";
     let nextTranslatedSubtitle = "";
