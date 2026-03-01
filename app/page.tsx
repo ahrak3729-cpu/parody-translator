@@ -421,6 +421,7 @@ function looksLikeAuthorLine(line: string) {
   return false;
 }
 
+const mk = parseEpisodeMarkerLine(ln);
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
@@ -550,7 +551,6 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     if (!ln) continue;
 
     if (episodeNo == null) {
-      const mk = parseEpisodeMarkerLine(ln);
       if (mk) {
         episodeNo = mk.n;
         episodeHeader = mk.raw; // ✅ "#01" 같은 원문 그대로 / 第1話는 "제 1화"
@@ -1064,18 +1064,18 @@ useEffect(() => {
   setSeriesTitle(it.seriesTitle || "");
   setEpisodeNo(it.episodeNo ?? null);
 
-  setEpisodeHeader(it.episodeHeader || ""); // ✅ 이 줄 추가
+  setEpisodeHeader(it.episodeHeader || ""); // ✅
 
   setSubtitle(it.subtitle || "");
   setTranslatedSubtitle(it.translatedSubtitle || "");
   setSource(it.sourceText);
   setResultBody(it.translatedText || "");
-  setShowHeader(it.showHeader);
+  setShowHeader(!!it.showHeader);
   setError("");
   setProgress(null);
   setCurrentHistoryId(it.id);
   setHistoryOpen(false);
-  }
+}
 
   async function handleCopy(text: string) {
     try {
@@ -1179,9 +1179,7 @@ useEffect(() => {
     // ✅ 작업용 변수 (원문에서 추출 못하면 null 유지)
     let workingText = rawText;
     let nextEpisodeNo: number | null = null; // 🔥 임의 1화 생성 금지
-    let nextEpisodeHeader = ""; // 원문 회차 헤더(#01 등) 저장용
     let nextEpisodeHeader = ""; // 표시용 회차 표식(원문 그대로)
-    let nextEpisodeHeader = "";
     let nextSubtitle = "";
     let nextTranslatedSubtitle = "";
 
@@ -1277,7 +1275,7 @@ useEffect(() => {
   episodeNo: extractedEpisode ? nextEpisodeNo : null,
 
   // ✅ 추가
-  episodeHeader: episodeHeader.trim(),
+  episodeHeader: nextEpisodeHeader.trim(),
 
   subtitle: extractedSubtitle ? nextSubtitle : "",
   translatedSubtitle: extractedSubtitle ? nextTranslatedSubtitle : "",
