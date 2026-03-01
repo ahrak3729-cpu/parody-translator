@@ -210,25 +210,31 @@ function loadHistory(): HistoryItem[] {
             : null;
 
         const item: HistoryItem = {
-          id: String((x as any).id),
-          createdAt: Number((x as any).createdAt) || Date.now(),
-          seriesTitle: typeof (x as any).seriesTitle === "string" ? (x as any).seriesTitle : "",
-          episodeNo: ep,
-           episodeHeader:
-            typeof (x as any).episodeHeader === "string"
-              ? (x as any).episodeHeader
-              : ep != null
-              ? `제 ${ep}화`
-              : "",
-          subtitle: typeof (x as any).subtitle === "string" ? (x as any).subtitle : "",
-          translatedSubtitle:
-            typeof (x as any).translatedSubtitle === "string" ? (x as any).translatedSubtitle : undefined,
-          sourceText: typeof (x as any).sourceText === "string" ? (x as any).sourceText : "",
-          translatedText: typeof (x as any).translatedText === "string" ? (x as any).translatedText : "",
-          url: typeof (x as any).url === "string" ? (x as any).url : undefined,
-          folderId: typeof (x as any).folderId === "string" ? (x as any).folderId : (x as any).folderId ?? null,
-          showHeader: typeof (x as any).showHeader === "boolean" ? (x as any).showHeader : false,
-        };
+  id: String((x as any).id),
+  createdAt: Number((x as any).createdAt) || Date.now(),
+  seriesTitle: typeof (x as any).seriesTitle === "string" ? (x as any).seriesTitle : "",
+  episodeNo: ep,
+
+  // ✅ NEW: episodeHeader (구버전 호환 포함)
+  // - 저장된 값이 있으면 그걸 사용
+  // - 없으면 episodeNo가 있으면 "제 N화"
+  // - 없으면 ""
+  episodeHeader:
+    typeof (x as any).episodeHeader === "string"
+      ? (x as any).episodeHeader
+      : ep != null
+      ? `제 ${ep}화`
+      : "",
+
+  subtitle: typeof (x as any).subtitle === "string" ? (x as any).subtitle : "",
+  translatedSubtitle:
+    typeof (x as any).translatedSubtitle === "string" ? (x as any).translatedSubtitle : undefined,
+  sourceText: typeof (x as any).sourceText === "string" ? (x as any).sourceText : "",
+  translatedText: typeof (x as any).translatedText === "string" ? (x as any).translatedText : "",
+  url: typeof (x as any).url === "string" ? (x as any).url : undefined,
+  folderId: typeof (x as any).folderId === "string" ? (x as any).folderId : (x as any).folderId ?? null,
+  showHeader: typeof (x as any).showHeader === "boolean" ? (x as any).showHeader : false,
+};
         return item;
       });
   } catch {
@@ -418,6 +424,50 @@ function looksLikeAuthorLine(line: string) {
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
+   type EpisodeMarker = { kind: "hash" | "jp" | "ko"; n: number; raw: string };
+
+function toKoreanEpisodeHeader(n: number) {
+  return `제 ${n}화`;
+}
+
+// ✅ 단독 회차 표식만 "원문 그대로" 추출
+function parseEpisodeMarkerLine(line: string): EpisodeMarker | null {
+  const s = line.trim();
+  if (!s) return null;
+
+  // "#1" / "#01" (원문 그대로 유지)
+  let m = s.match(/^#\s*(\d{1,4})\s*$/);
+  if (m?.[1]) {
+    const digits = m[1]; // ← "01" 보존
+    const n = Number(digits);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
+      return { kind: "hash", n, raw: `#${digits}` };
+    }
+    return null;
+  }
+
+  // "第1話" (표시는 한글 표준으로)
+  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
+      return { kind: "jp", n, raw: toKoreanEpisodeHeader(n) };
+    }
+    return null;
+  }
+
+  // "제 1화" / "1화" (표시는 "제 n화"로 표준화)
+  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
+      return { kind: "ko", n, raw: toKoreanEpisodeHeader(n) };
+    }
+    return null;
+  }
+
+  return null;
+}
   // ✅ 단독 회차 표식만 인정 (뒤에 텍스트가 붙으면 회차로 보지 않음)
   // "#1" / "#01"
   let m = s.match(/^#\s*(\d{1,4})\s*$/);
@@ -478,8 +528,9 @@ function pickSubtitleFromLine(line: string): string | null {
 
 type PixivPresetResult = {
   cleanedText: string;
-  episodeNo?: number;
-  subtitle?: string; // 원문 부제목
+  episodeNo?: number;       // 숫자용(정렬/라벨)
+  episodeHeader?: string;   // ✅ 표시용(원문 그대로 "#01" 등)
+  subtitle?: string;        // 원문 부제목
 };
 
 function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
@@ -489,7 +540,8 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
   const lines = text.split("\n").map((l) => l.replace(/\s+$/g, ""));
   const outLines: string[] = [];
 
-  let episodeNo: number | undefined;
+ let episodeNo: number | undefined;
+  let episodeHeader: string | undefined;
   let subtitle: string | undefined;
 
   // 상단 몇 줄에서 회차/부제목 후보를 우선 탐색
@@ -498,8 +550,11 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     if (!ln) continue;
 
     if (episodeNo == null) {
-      const n = parseEpisodeNo(ln);
-      if (n != null) episodeNo = n;
+      const mk = parseEpisodeMarkerLine(ln);
+      if (mk) {
+        episodeNo = mk.n;
+        episodeHeader = mk.raw; // ✅ "#01" 같은 원문 그대로 / 第1話는 "제 1화"
+      }
     }
 
     if (!subtitle) {
@@ -526,7 +581,7 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { cleanedText: cleaned, episodeNo, subtitle };
+  return { cleanedText: cleaned, episodeNo, episodeHeader, subtitle };
 }
 
 export default function Page() {
@@ -610,6 +665,7 @@ export default function Page() {
 
   // ✅ 회차 기본값 임의 생성 금지: null부터 시작
   const [episodeNo, setEpisodeNo] = useState<number | null>(null);
+   const [episodeHeader, setEpisodeHeader] = useState(""); // ✅ 원문 회차 표식 그대로 표시용
 
   // 원문 부제목(저장용)
   const [subtitle, setSubtitle] = useState("");
@@ -667,10 +723,16 @@ export default function Page() {
   // ✅ 헤더는 “회차(큰 제목) + 번역된 부제목(작은 줄)”
   //    회차가 없으면 epLine은 빈 문자열
   const headerPreview = useMemo(() => {
-    const epLine = episodeNo != null ? `제 ${episodeNo}화` : "";
+    // ✅ 원문 표식이 있으면 그대로, 없으면(구버전/예외) episodeNo 기반으로 fallback
+    const epLine = episodeHeader.trim()
+      ? episodeHeader.trim()
+      : episodeNo != null
+      ? `제 ${episodeNo}화`
+      : "";
+
     const subLine = translatedSubtitle.trim();
     return { epLine, subLine };
-  }, [episodeNo, translatedSubtitle]);
+  }, [episodeHeader, episodeNo, translatedSubtitle]);
 
   const percent =
     progress && progress.total ? Math.floor((progress.current / progress.total) * 100) : 0;
@@ -779,37 +841,37 @@ export default function Page() {
   }, []);
 
   // ✅ 세션 자동 저장
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    try {
-      const payload: AppSession = {
-        url,
-        manualOpen,
-        seriesTitle,
-        episodeNo,
-        episodeHeader,
-        subtitle,
-        translatedSubtitle,
-        source,
-        resultBody,
-        showHeader,
-        currentHistoryId,
-      };
-      saveSession(payload);
-    } catch {}
-  }, [
-    url,
-    manualOpen,
-    seriesTitle,
-    episodeNo,
-    episodeHeader,
-    subtitle,
-    translatedSubtitle,
-    source,
-    resultBody,
-    showHeader,
-    currentHistoryId,
-  ]);
+useEffect(() => {
+  if (typeof window === "undefined") return;
+  try {
+    const payload: AppSession = {
+      url,
+      manualOpen,
+      seriesTitle,
+      episodeNo,
+      episodeHeader, // ✅ 추가
+      subtitle,
+      translatedSubtitle,
+      source,
+      resultBody,
+      showHeader,
+      currentHistoryId,
+    };
+    saveSession(payload);
+  } catch {}
+}, [
+  url,
+  manualOpen,
+  seriesTitle,
+  episodeNo,
+  episodeHeader, // ✅ dependency 배열에도 추가
+  subtitle,
+  translatedSubtitle,
+  source,
+  resultBody,
+  showHeader,
+  currentHistoryId,
+]);
 
   /* =========================
      폴더 재귀 유틸
@@ -998,17 +1060,21 @@ export default function Page() {
   }
 
   function loadHistoryItem(it: HistoryItem) {
-    setSeriesTitle(it.seriesTitle || "");
-    setEpisodeNo(it.episodeNo ?? null);
-    setSubtitle(it.subtitle || "");
-    setTranslatedSubtitle(it.translatedSubtitle || "");
-    setSource(it.sourceText);
-    setResultBody(it.translatedText || "");
-    setShowHeader(!!it.showHeader);
-    setError("");
-    setProgress(null);
-    setCurrentHistoryId(it.id);
-    setHistoryOpen(false);
+  function loadHistoryItem(it: HistoryItem) {
+  setSeriesTitle(it.seriesTitle || "");
+  setEpisodeNo(it.episodeNo ?? null);
+
+  setEpisodeHeader(it.episodeHeader || ""); // ✅ 이 줄 추가
+
+  setSubtitle(it.subtitle || "");
+  setTranslatedSubtitle(it.translatedSubtitle || "");
+  setSource(it.sourceText);
+  setResultBody(it.translatedText || "");
+  setShowHeader(it.showHeader);
+  setError("");
+  setProgress(null);
+  setCurrentHistoryId(it.id);
+  setHistoryOpen(false);
   }
 
   async function handleCopy(text: string) {
@@ -1052,34 +1118,39 @@ export default function Page() {
   }
 
   function autoSaveToHistory(params: {
-    sourceText: string;
-    translatedBody: string;
-    url?: string;
-    seriesTitle: string;
-    episodeNo: number | null;
-    subtitle: string;
-    translatedSubtitle: string;
-    showHeader: boolean;
-  }) {
-    const item: HistoryItem = {
-      id: uid(),
-      createdAt: Date.now(),
-      seriesTitle: params.seriesTitle.trim() || "", // ✅ 자동 기본값 금지
-      episodeNo: params.episodeNo, // ✅ 없으면 null 유지
-      subtitle: params.subtitle.trim(),
-      translatedSubtitle: params.translatedSubtitle.trim(),
-      sourceText: params.sourceText,
-      translatedText: params.translatedBody,
-      url: params.url?.trim() || undefined,
-      folderId: selectedFolderId || null,
-      showHeader: params.showHeader,
-    };
+  sourceText: string;
+  translatedBody: string;
+  url?: string;
+  seriesTitle: string;
+  episodeNo: number | null;
+  episodeHeader: string; // ✅ 추가
+  subtitle: string;
+  translatedSubtitle: string;
+  showHeader: boolean;
+}) {
+  const item: HistoryItem = {
+    id: uid(),
+    createdAt: Date.now(),
+    seriesTitle: params.seriesTitle.trim() || "",
+    episodeNo: params.episodeNo,
 
-    const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
-    persistHistory(next);
-    setCurrentHistoryId(item.id);
-    setHistoryPage(1);
-  }
+    // ✅ 추가
+    episodeHeader: params.episodeHeader.trim(),
+
+    subtitle: params.subtitle.trim(),
+    translatedSubtitle: params.translatedSubtitle.trim(),
+    sourceText: params.sourceText,
+    translatedText: params.translatedBody,
+    url: params.url?.trim() || undefined,
+    folderId: selectedFolderId || null,
+    showHeader: params.showHeader,
+  };
+
+  const next = [item, ...history].sort((a, b) => b.createdAt - a.createdAt);
+  persistHistory(next);
+  setCurrentHistoryId(item.id);
+  setHistoryPage(1);
+}
 
   function handleCancel() {
     abortRef.current?.abort();
@@ -1108,6 +1179,9 @@ export default function Page() {
     // ✅ 작업용 변수 (원문에서 추출 못하면 null 유지)
     let workingText = rawText;
     let nextEpisodeNo: number | null = null; // 🔥 임의 1화 생성 금지
+    let nextEpisodeHeader = ""; // ✅ 원문 회차 헤더(#01 등) 저장용
+    let nextEpisodeHeader = ""; // ✅ 표시용 회차 표식(원문 그대로)
+    let nextEpisodeHeader = "";
     let nextSubtitle = "";
     let nextTranslatedSubtitle = "";
 
@@ -1122,14 +1196,26 @@ export default function Page() {
         if (r.cleanedText.trim()) workingText = r.cleanedText;
 
         if (typeof r.episodeNo === "number" && Number.isFinite(r.episodeNo)) {
-          nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
-          extractedEpisode = true;
-          setEpisodeNo(nextEpisodeNo);
-        } else {
-          nextEpisodeNo = null;
-          extractedEpisode = false;
-          setEpisodeNo(null);
-        }
+  nextEpisodeNo = Math.max(1, Math.floor(r.episodeNo));
+  extractedEpisode = true;
+  setEpisodeNo(nextEpisodeNo);
+
+  // ✅ episodeHeader도 같이 추출 (#01, 第1話 등 원문 그대로)
+  if (typeof (r as any).episodeHeader === "string") {
+    nextEpisodeHeader = String((r as any).episodeHeader).trim();
+  } else {
+    nextEpisodeHeader = "";
+  }
+  setEpisodeHeader(nextEpisodeHeader);
+} else {
+  nextEpisodeNo = null;
+  extractedEpisode = false;
+  setEpisodeNo(null);
+
+  // ✅ episodeNo 없으면 header도 비움 (임의 생성 금지)
+  nextEpisodeHeader = "";
+  setEpisodeHeader("");
+}
 
         if (typeof r.subtitle === "string" && r.subtitle.trim()) {
           nextSubtitle = r.subtitle.trim();
@@ -1184,15 +1270,19 @@ export default function Page() {
       setShowHeader(!!nextShowHeader);
 
       autoSaveToHistory({
-        sourceText: rawText.trim(),
-        translatedBody: out,
-        url: opts?.sourceUrl,
-        seriesTitle: seriesTitle.trim() || "", // ✅ 자동 기본값 금지
-        episodeNo: extractedEpisode ? nextEpisodeNo : null,
-        subtitle: extractedSubtitle ? nextSubtitle : "",
-        translatedSubtitle: extractedSubtitle ? nextTranslatedSubtitle : "",
-        showHeader: !!nextShowHeader,
-      });
+  sourceText: rawText.trim(),
+  translatedBody: out,
+  url: opts?.sourceUrl,
+  seriesTitle: seriesTitle.trim() || "",
+  episodeNo: extractedEpisode ? nextEpisodeNo : null,
+
+  // ✅ 추가
+  episodeHeader: episodeHeader.trim(),
+
+  subtitle: extractedSubtitle ? nextSubtitle : "",
+  translatedSubtitle: extractedSubtitle ? nextTranslatedSubtitle : "",
+  showHeader: !!nextShowHeader,
+});
     } catch (e: any) {
       if (e?.name === "AbortError") setError("번역이 취소되었습니다.");
       else setError(e?.message || "번역 오류");
