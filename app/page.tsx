@@ -683,6 +683,8 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
       if (looksLikeDateTimeLine(t)) continue;
       if (looksLikeAuthorLine(t)) continue;
     }
+     
+     if (parseEpisodeMarkerLine(t)) continue;
 
     outLines.push(l);
   }
