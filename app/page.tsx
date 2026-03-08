@@ -421,12 +421,6 @@ function looksLikeAuthorLine(line: string) {
   return false;
 }
 
-type PixivPresetResult = {
-  cleanedText: string;
-  episodeNo?: number;       // 숫자용(정렬/라벨)
-  episodeHeader?: string;   // ✅ 표시용(원문 그대로 "#01" 등)
-  subtitle?: string;        // 원문 부제목
-};
 function toKoreanEpisodeHeader(n: number) {
   return `제 ${n}화`;
 }
