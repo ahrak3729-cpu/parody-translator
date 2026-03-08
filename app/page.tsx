@@ -422,6 +422,16 @@ function looksLikeAuthorLine(line: string) {
 }
 
 const mk = parseEpisodeMarkerLine(ln);
+function parseEpisodeMarkerLine(line: string): string | null {
+  const s = line.trim();
+
+  // 예: "#01", "第1話", "제1화"
+  const m = s.match(/^(#\d+|第\s*\d+\s*話|제\s*\d+\s*화)/i);
+
+  if (!m) return null;
+  return m[0];
+}
+
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
