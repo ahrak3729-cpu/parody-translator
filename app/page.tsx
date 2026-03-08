@@ -489,7 +489,17 @@ function parseEpisodeNo(line: string): number | null {
 
   return null;
 }
-
+function isSideLabel(s: string): boolean {
+  const t = s.toLowerCase();
+  return (
+    t === "side" ||
+    t.startsWith("side ") ||
+    t.startsWith("side:") ||
+    t.startsWith("side -") ||
+    t.startsWith("side fate") ||
+    t.startsWith("side story")
+  );
+}
 function pickSubtitleFromLine(line: string): string | null {
   const raw = line.trim();
   if (!raw) return null;
