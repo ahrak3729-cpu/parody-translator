@@ -573,24 +573,6 @@ function parseEpisodeMarkerLine(line: string): string | null {
 }
 
 function parseEpisodeNo(line: string): number | null {
-  const s = line.trim();
-
-  // 단독 회차 표식만 인정
-  // #1 / #01
-  let m = s.match(/^#\s*(\d{1,4})\s*$/);
-  if (m?.[1]) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
-    return null;
-  }
-
-  // 第1話
-  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
-  if (m?.[1]) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
-    return null;
-  }
 
   // 제 1화 / 1화
   m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
