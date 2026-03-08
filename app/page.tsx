@@ -463,7 +463,6 @@ function parseEpisodeMarkerLine(line: string): string | null {
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
 
-  // 단독 회차 표식만 인정
   // #1 / #01
   let m = s.match(/^#\s*(\d{1,4})\s*$/);
   if (m?.[1]) {
