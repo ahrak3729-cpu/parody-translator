@@ -1059,13 +1059,10 @@ useEffect(() => {
     disableSelectMode();
   }
 
-  function loadHistoryItem(it: HistoryItem) {
-  function loadHistoryItem(it: HistoryItem) {
+   function loadHistoryItem(it: HistoryItem) {
   setSeriesTitle(it.seriesTitle || "");
   setEpisodeNo(it.episodeNo ?? null);
-
-  setEpisodeHeader(it.episodeHeader || ""); // ✅
-
+  setEpisodeHeader(it.episodeHeader || "");
   setSubtitle(it.subtitle || "");
   setTranslatedSubtitle(it.translatedSubtitle || "");
   setSource(it.sourceText);
@@ -1075,7 +1072,7 @@ useEffect(() => {
   setProgress(null);
   setCurrentHistoryId(it.id);
   setHistoryOpen(false);
-}
+   }
 
   async function handleCopy(text: string) {
     try {
