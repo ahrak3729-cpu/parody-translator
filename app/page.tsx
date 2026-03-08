@@ -420,8 +420,6 @@ function looksLikeAuthorLine(line: string) {
   if (/^\S+\s*\(.*\)$/.test(s) && s.length <= 40) return true; // 짧은 "이름(무언가)"
   return false;
 }
-
-const mk = parseEpisodeMarkerLine(ln);
 function parseEpisodeMarkerLine(line: string): string | null {
   const s = line.trim();
 
