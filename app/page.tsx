@@ -439,40 +439,32 @@ function toKoreanEpisodeHeader(n: number) {
   return `제 ${n}화`;
 }
 
-// ✅ 단독 회차 표식만 "원문 그대로" 추출
-function parseEpisodeMarkerLine(line: string): EpisodeMarker | null {
+function parseEpisodeMarkerLine(line: string): string | null {
   const s = line.trim();
   if (!s) return null;
 
-  // "#1" / "#01" (원문 그대로 유지)
+  // #01 / #1 → 원문 그대로 유지
   let m = s.match(/^#\s*(\d{1,4})\s*$/);
   if (m?.[1]) {
-    const digits = m[1]; // ← "01" 보존
-    const n = Number(digits);
-    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
-      return { kind: "hash", n, raw: `#${digits}` };
-    }
-    return null;
+    return `#${m[1]}`;
   }
 
-  // "第1話" (표시는 한글 표준으로)
+  // 第1話 → 표시용은 "제 1화"
   m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
   if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) {
-      return { kind: "jp", n, raw: toKoreanEpisodeHeader(n) };
+      return toKoreanEpisodeHeader(n);
     }
-    return null;
   }
 
-  // "제 1화" / "1화" (표시는 "제 n화"로 표준화)
+  // 제 1화 / 1화 → "제 1화"로 통일
   m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
   if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) {
-      return { kind: "ko", n, raw: toKoreanEpisodeHeader(n) };
+      return toKoreanEpisodeHeader(n);
     }
-    return null;
   }
 
   return null;
@@ -541,6 +533,114 @@ type PixivPresetResult = {
   episodeHeader?: string;   // ✅ 표시용(원문 그대로 "#01" 등)
   subtitle?: string;        // 원문 부제목
 };
+function toKoreanEpisodeHeader(n: number) {
+  return `제 ${n}화`;
+}
+
+// 단독 회차 표식만 추출
+// - "#01" -> "#01" 그대로 유지
+// - "第1話" -> "제 1화"
+// - "1화", "제 1화" -> "제 1화"
+function parseEpisodeMarkerLine(line: string): string | null {
+  const s = line.trim();
+  if (!s) return null;
+
+  // #1 / #01
+  let m = s.match(/^#\s*(\d{1,4})\s*$/);
+  if (m?.[1]) {
+    return `#${m[1]}`;
+  }
+
+  // 第1話
+  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
+      return toKoreanEpisodeHeader(n);
+    }
+  }
+
+  // 제 1화 / 1화
+  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) {
+      return toKoreanEpisodeHeader(n);
+    }
+  }
+
+  return null;
+}
+
+function parseEpisodeNo(line: string): number | null {
+  const s = line.trim();
+
+  // 단독 회차 표식만 인정
+  // #1 / #01
+  let m = s.match(/^#\s*(\d{1,4})\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
+  }
+
+  // 第1話
+  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
+  }
+
+  // 제 1화 / 1화
+  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
+  if (m?.[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
+    return null;
+  }
+
+  return null;
+}
+
+function pickSubtitleFromLine(line: string): string | null {
+  const raw = line.trim();
+  if (!raw) return null;
+
+  // 너무 긴 문장은 제목으로 보기 어려움
+  if (raw.length > 80) return null;
+
+  // 회차 같은 숫자/기호 제거 후 남은 텍스트에서 제목 후보 추출
+  const cleaned = raw
+    .replace(/^#\s*\d+\s*/, "")
+    .replace(/^(?:第|제)?\s*\d+\s*(?:話|화)\s*[:：.-]?\s*/, "")
+    .trim();
+
+  if (!cleaned) return null;
+
+  // 구분자(|, /, -)가 있으면 첫 구간 우선
+  const parts = cleaned.split(/\s*(?:\||\/|／|—|–|-|―)\s*/g).filter(Boolean);
+  const cand = (parts[0] || "").trim();
+  if (!cand) return null;
+
+  // "Fate," 같은 꼬리 문장부호는 제목 후보 제외
+  if (/[,:，：]$/.test(cand)) return null;
+
+  // Side / Side Fate / Side out 제외
+  if (isSideLabel(cand)) return null;
+
+  // 문장형 제외
+  if (/[。.!?]$/.test(cand)) return null;
+
+  return cand;
+}
+
+type PixivPresetResult = {
+  cleanedText: string;
+  episodeNo?: number;
+  episodeHeader?: string;
+  subtitle?: string;
+};
 
 function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
   const text = normalizeText(rawText).trim();
@@ -549,20 +649,23 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
   const lines = text.split("\n").map((l) => l.replace(/\s+$/g, ""));
   const outLines: string[] = [];
 
- let episodeNo: number | undefined;
+  let episodeNo: number | undefined;
   let episodeHeader: string | undefined;
   let subtitle: string | undefined;
 
-  // 상단 몇 줄에서 회차/부제목 후보를 우선 탐색
+  // 상단 몇 줄에서 회차/부제목 후보 탐색
   for (let i = 0; i < Math.min(lines.length, 8); i++) {
     const ln = lines[i].trim();
     if (!ln) continue;
 
     if (episodeNo == null) {
-      if (mk) {
-        episodeNo = mk.n;
-        episodeHeader = mk.raw; // ✅ "#01" 같은 원문 그대로 / 第1話는 "제 1화"
-      }
+      const n = parseEpisodeNo(ln);
+      if (n != null) episodeNo = n;
+    }
+
+    if (!episodeHeader) {
+      const h = parseEpisodeMarkerLine(ln);
+      if (h) episodeHeader = h;
     }
 
     if (!subtitle) {
@@ -1205,11 +1308,11 @@ useEffect(() => {
 
   // ✅ episodeHeader도 같이 추출 (#01, 第1話 등 원문 그대로)
   if (typeof (r as any).episodeHeader === "string") {
-    nextEpisodeHeader = String((r as any).episodeHeader).trim();
-  } else {
-    nextEpisodeHeader = "";
-  }
-  setEpisodeHeader(nextEpisodeHeader);
+  nextEpisodeHeader = String((r as any).episodeHeader).trim();
+} else {
+  nextEpisodeHeader = "";
+}
+setEpisodeHeader(nextEpisodeHeader);
 } else {
   nextEpisodeNo = null;
   extractedEpisode = false;
