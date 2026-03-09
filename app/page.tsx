@@ -1267,13 +1267,6 @@ if (title.trim()) {
 setResultBody(finalText);
       setProgress({ current: chunks.length, total: chunks.length });
 
-      // ✅ 헤더는 “프리셋 ON + (원문에서 회차/부제목을 실제로 뽑았을 때만)”
-      const hasRealHeader =
-        settings.pixivPresetEnabled && (extractedEpisode || (extractedSubtitle && !!nextTranslatedSubtitle.trim()));
-
-      const nextShowHeader = hasRealHeader;
-      setShowHeader(!!nextShowHeader);
-
       autoSaveToHistory({
   sourceText: rawText.trim(),
   translatedBody: out,
