@@ -463,29 +463,24 @@ function normalizeEpisodeLine(line: string): string | null {
 
 function parseEpisodeNo(line: string): number | null {
   const s = line.trim();
+  if (!s) return null;
 
-  // #1 / #01
   let m = s.match(/^#\s*(\d{1,4})\s*$/);
   if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
-    return null;
   }
 
-  // 第1話
-  m = s.match(/^第\s*(\d{1,4})\s*話\s*$/);
+  m = s.match(/^第\s*(\d{1,4})\s*話$/);
   if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
-    return null;
   }
 
-  // 제 1화 / 1화
-  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화\s*$/);
+  m = s.match(/^(?:제\s*)?(\d{1,4})\s*화$/);
   if (m?.[1]) {
     const n = Number(m[1]);
     if (Number.isFinite(n) && n >= 1 && n <= 9999) return n;
-    return null;
   }
 
   return null;
@@ -504,31 +499,33 @@ function isSideLabel(s: string): boolean {
     t.startsWith("side -")
   );
 }
+
 function pickSubtitleFromLine(line: string): string | null {
   const raw = line.trim();
   if (!raw) return null;
+  if (raw.length > 120) return null;
 
-  if (raw.length > 80) return null;
+  // 회차만 있는 줄은 제목 아님
+  if (/^#\s*\d+\s*$/.test(raw)) return null;
+  if (/^第\s*\d+\s*話\s*$/.test(raw)) return null;
+  if (/^(?:제\s*)?\d+\s*화\s*$/.test(raw)) return null;
 
+  // "회차 + 제목" 한 줄 형태면, 회차를 떼고 제목만 추출
   const cleaned = raw
-    .replace(/^#\s*\d+\s*/, "")
-    .replace(/^(?:第|제)?\s*\d+\s*(?:話|화)\s*[:：.-]?\s*/, "")
+    .replace(/^#\s*\d+\s+/, "")
+    .replace(/^第\s*\d+\s*話\s+/, "")
+    .replace(/^(?:제\s*)?\d+\s*화\s+/, "")
     .trim();
 
   if (!cleaned) return null;
 
-  const parts = cleaned
-    .split(/\s*(?:\||\/|／|—|–|-|―)\s*/g)
-    .filter(Boolean);
+  // 문장형 제외
+  if (/[。.!?]$/.test(cleaned)) return null;
 
-  const cand = (parts[0] || "").trim();
-  if (!cand) return null;
+  // side 계열 제외
+  if (isSideLabel(cleaned)) return null;
 
-  if (isSideLabel(cand)) return null;
-  if (/[,:，：]$/.test(cand)) return null;
-  if (/[。.!?]$/.test(cand)) return null;
-
-  return cand;
+  return cleaned;
 }
 
 
