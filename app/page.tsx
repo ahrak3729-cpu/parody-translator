@@ -500,6 +500,18 @@ function isSideLabel(s: string): boolean {
     t.startsWith("side story")
   );
 }
+function isSideLabel(s: string): boolean {
+  const t = s.trim().toLowerCase();
+
+  return (
+    t === "side" ||
+    t === "side fate" ||
+    t === "side out" ||
+    t.startsWith("side ") ||
+    t.startsWith("side:") ||
+    t.startsWith("side -")
+  );
+}
 function pickSubtitleFromLine(line: string): string | null {
   const raw = line.trim();
   if (!raw) return null;
