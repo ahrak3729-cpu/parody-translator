@@ -429,10 +429,10 @@ function toKoreanEpisodeHeader(n: number) {
 // - "#01" -> "#01" 그대로 유지
 // - "第1話" -> "제 1화"
 // - "1화", "제 1화" -> "제 1화"
-function (line: string): string | null {
+function normalizeEpisodeLine(line: string): string | null {
   const s = line.trim();
   if (!s) return null;
-
+}
   // #1 / #01
   let m = s.match(/^#\s*(\d{1,4})\s*$/);
   if (m?.[1]) {
