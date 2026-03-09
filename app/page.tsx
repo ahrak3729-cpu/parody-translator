@@ -429,7 +429,7 @@ function toKoreanEpisodeHeader(n: number) {
 // - "#01" -> "#01" 그대로 유지
 // - "第1話" -> "제 1화"
 // - "1화", "제 1화" -> "제 1화"
-function parseEpisodeMarkerLine(line: string): string | null {
+function (line: string): string | null {
   const s = line.trim();
   if (!s) return null;
 
@@ -533,9 +533,6 @@ function pickSubtitleFromLine(line: string): string | null {
 
 type PixivPresetResult = {
   cleanedText: string;
-  episodeNo?: number;
-  episodeHeader?: string;
-  subtitle?: string;
 };
 
 function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
@@ -545,31 +542,26 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
   const lines = text.split("\n").map((l) => l.replace(/\s+$/g, ""));
   const outLines: string[] = [];
 
-  let episodeNo: number | undefined;
-  let episodeHeader: string | undefined;
-  let subtitle: string | undefined;
 
   // 상단 몇 줄에서 회차/부제목 후보 탐색
   for (let i = 0; i < Math.min(lines.length, 8); i++) {
     const ln = lines[i].trim();
     if (!ln) continue;
-
-    if (episodeNo == null) {
-      const n = parseEpisodeNo(ln);
-      if (n != null) episodeNo = n;
-    }
-
-    if (!episodeHeader) {
-      const h = parseEpisodeMarkerLine(ln);
-      if (h) episodeHeader = h;
-    }
-
-    if (!subtitle) {
-      const t = pickSubtitleFromLine(ln);
-      if (t) subtitle = t;
-    }
   }
+function splitTitleAndBody(text: string): { title: string; body: string } {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return { title: "", body: "" };
 
+  const lines = normalized.split("\n");
+  const first = lines.findIndex((l) => l.trim());
+
+  if (first === -1) return { title: "", body: "" };
+
+  const title = lines[first].trim();
+  const body = lines.slice(first + 1).join("\n").trim();
+
+  return { title, body };
+}
   // 메타 제거 + 정리
   for (const l0 of lines) {
     const l = l0.trimEnd();
@@ -590,8 +582,9 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  return { cleanedText: cleaned, episodeNo, episodeHeader, subtitle };
-}
+  return {
+  cleanedText: cleaned,
+};
 
 export default function Page() {
   /* =========================
@@ -1249,8 +1242,12 @@ setEpisodeHeader(nextEpisodeHeader);
         setSubtitle("");
         setTranslatedSubtitle("");
       }
+let translatedTitle = "";
 
-      const chunks = chunkText(workingText, 4500);
+if (title.trim()) {
+  translatedTitle = await translateChunk(title, controller.signal);
+}
+      const chunks = chunkText(body, 4500);
       if (chunks.length > 80)
         throw new Error(`너무 길어서 자동 처리 부담이 큽니다. (분할 ${chunks.length}조각)`);
 
@@ -1263,7 +1260,11 @@ setEpisodeHeader(nextEpisodeHeader);
         out += (out ? "\n\n" : "") + t.trim();
       }
 
-      setResultBody(out);
+      const finalText = translatedTitle
+  ? translatedTitle + "\n\n" + out
+  : out;
+
+setResultBody(finalText);
       setProgress({ current: chunks.length, total: chunks.length });
 
       // ✅ 헤더는 “프리셋 ON + (원문에서 회차/부제목을 실제로 뽑았을 때만)”
