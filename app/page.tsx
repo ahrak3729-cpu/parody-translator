@@ -603,11 +603,10 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
   }
 
   return {
-    cleanedText: cleaned,
-    episodeNo,
-    episodeHeader,
-    subtitle,
-  };
+  cleanedText: cleaned,
+  episodeHeader,
+  subtitle,
+};
 }
 export default function Page() {
   /* =========================
@@ -1123,20 +1122,27 @@ useEffect(() => {
   /* =========================
      번역 API
   ========================= */
-  async function translateChunk(text: string, signal: AbortSignal) {
-    const res = await fetch("/api/translate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal,
-    });
-    const data = await safeReadJson(res);
+  async function translateChunk(
+  text: string,
+  signal?: AbortSignal
+): Promise<string> {
+  const res = await fetch("/api/translate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+    signal,
+  });
 
-    if (!res.ok) {
-      const msg = (data && ((data as any).error || (data as any).message)) || "번역 실패";
-      throw new Error(String(msg));
-    }
-    return String((data as any)?.translated ?? "");
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const msg =
+      (data && ((data as any).error || (data as any).message)) ||
+      `번역 실패 (${res.status})`;
+    throw new Error(String(msg));
+  }
+
+  return String((data as any)?.translated ?? "");
   }
 
   function autoSaveToHistory(params: {
