@@ -489,17 +489,7 @@ function parseEpisodeNo(line: string): number | null {
 
   return null;
 }
-function isSideLabel(s: string): boolean {
-  const t = s.toLowerCase();
-  return (
-    t === "side" ||
-    t.startsWith("side ") ||
-    t.startsWith("side:") ||
-    t.startsWith("side -") ||
-    t.startsWith("side fate") ||
-    t.startsWith("side story")
-  );
-}
+
 function isSideLabel(s: string): boolean {
   const t = s.trim().toLowerCase();
 
@@ -507,6 +497,7 @@ function isSideLabel(s: string): boolean {
     t === "side" ||
     t === "side fate" ||
     t === "side out" ||
+    t === "side story" ||
     t.startsWith("side ") ||
     t.startsWith("side:") ||
     t.startsWith("side -")
@@ -516,10 +507,8 @@ function pickSubtitleFromLine(line: string): string | null {
   const raw = line.trim();
   if (!raw) return null;
 
-  // 너무 긴 문장은 제목으로 보기 어려움
   if (raw.length > 80) return null;
 
-  // 회차 같은 숫자/기호 제거 후 남은 텍스트에서 제목 후보 추출
   const cleaned = raw
     .replace(/^#\s*\d+\s*/, "")
     .replace(/^(?:第|제)?\s*\d+\s*(?:話|화)\s*[:：.-]?\s*/, "")
@@ -527,22 +516,20 @@ function pickSubtitleFromLine(line: string): string | null {
 
   if (!cleaned) return null;
 
-  // 구분자(|, /, -)가 있으면 첫 구간 우선
-  const parts = cleaned.split(/\s*(?:\||\/|／|—|–|-|―)\s*/g).filter(Boolean);
+  const parts = cleaned
+    .split(/\s*(?:\||\/|／|—|–|-|―)\s*/g)
+    .filter(Boolean);
+
   const cand = (parts[0] || "").trim();
   if (!cand) return null;
 
-  // "Fate," 같은 꼬리 문장부호는 제목 후보 제외
-  if (/[,:，：]$/.test(cand)) return null;
-
-  // Side / Side Fate / Side out 제외
   if (isSideLabel(cand)) return null;
-
-  // 문장형 제외
+  if (/[,:，：]$/.test(cand)) return null;
   if (/[。.!?]$/.test(cand)) return null;
 
   return cand;
 }
+
 
 type PixivPresetResult = {
   cleanedText: string;
