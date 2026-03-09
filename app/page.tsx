@@ -534,56 +534,81 @@ type PixivPresetResult = {
 };
 
 function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
-  const text = normalizeText(rawText).trim();
-  if (!text) return { cleanedText: "" };
-
-  const lines = text.split("\n").map((l) => l.replace(/\s+$/g, ""));
-  const outLines: string[] = [];
-
-
-  // 상단 몇 줄에서 회차/부제목 후보 탐색
-  for (let i = 0; i < Math.min(lines.length, 8); i++) {
-    const ln = lines[i].trim();
-    if (!ln) continue;
+  let text = normalizeText(rawText).trim();
+  if (!text) {
+    return { cleanedText: "" };
   }
-function splitTitleAndBody(text: string): { title: string; body: string } {
-  const normalized = text.replace(/\r\n/g, "\n").trim();
-  if (!normalized) return { title: "", body: "" };
 
-  const lines = normalized.split("\n");
-  const first = lines.findIndex((l) => l.trim());
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/\s+$/g, ""));
 
-  if (first === -1) return { title: "", body: "" };
+  let episodeNo: number | undefined = undefined;
+  let episodeHeader: string | undefined = undefined;
+  let subtitle: string | undefined = undefined;
 
-  const title = lines[first].trim();
-  const body = lines.slice(first + 1).join("\n").trim();
+  const top = lines.slice(0, 8);
 
-  return { title, body };
-}
-  // 메타 제거 + 정리
-  for (const l0 of lines) {
-    const l = l0.trimEnd();
-    const t = l.trim();
+  for (const line of top) {
+    const raw = line.trim();
+    if (!raw) continue;
 
-    if (stripMeta) {
-      if (looksLikeDateTimeLine(t)) continue;
-      if (looksLikeAuthorLine(t)) continue;
+    if (!episodeHeader) {
+      const normalized = normalizeEpisodeLine(raw);
+      if (normalized) {
+        episodeHeader = normalized;
+      }
     }
-     
-     if (parseEpisodeMarkerLine(t)) continue;
 
-    outLines.push(l);
+    if (episodeNo === undefined) {
+      const n = parseEpisodeNo(raw);
+      if (typeof n === "number" && Number.isFinite(n)) {
+        episodeNo = n;
+      }
+    }
+
+    if (!subtitle) {
+      const picked = pickSubtitleFromLine(raw);
+      if (picked) {
+        subtitle = picked;
+      }
+    }
   }
 
-  const cleaned = outLines
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  let cleaned = text;
+
+  if (stripMeta) {
+    const removableTopLines = new Set<number>();
+
+    for (let i = 0; i < Math.min(lines.length, 8); i++) {
+      const raw = lines[i].trim();
+      if (!raw) continue;
+
+      if (normalizeEpisodeLine(raw)) {
+        removableTopLines.add(i);
+        continue;
+      }
+
+      const picked = pickSubtitleFromLine(raw);
+      if (picked) {
+        removableTopLines.add(i);
+        continue;
+      }
+    }
+
+    cleaned = lines
+      .filter((_, idx) => !removableTopLines.has(idx))
+      .join("\n")
+      .trim();
+  }
 
   return {
-  cleanedText: cleaned,
-};
-
+    cleanedText: cleaned,
+    episodeNo,
+    episodeHeader,
+    subtitle,
+  };
+}
 export default function Page() {
   /* =========================
      Settings (persisted)
