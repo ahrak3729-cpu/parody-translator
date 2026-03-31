@@ -531,6 +531,8 @@ function pickSubtitleFromLine(line: string): string | null {
 
 type PixivPresetResult = {
   cleanedText: string;
+  episodeHeader?: string;
+  subtitle?: string;
 };
 
 function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResult {
