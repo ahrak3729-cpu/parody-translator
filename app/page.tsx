@@ -635,38 +635,28 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
 };
 }
 export default function Page() {
-  const [isOpen, setIsOpen] = useState(false); 
-  <button onClick={() => setIsOpen(true)}>
-  📘 규칙
-</button>
-  /* =========================
-     Settings (persisted)
-  ========================= */
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [isOpen, setIsOpen] = useState(false);
 
-  // ✅ "설정을 로드한 뒤에만 저장"하기 위한 가드
+  // 👉 기존에 있던 state들 그대로 유지
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const settingsHydratedRef = useRef(false);
 
-  // 설정 모달(draft)
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [draftSettings, setDraftSettings] = useState<AppSettings>(settings);
   const [settingsDirty, setSettingsDirty] = useState(false);
 
-  // ✅ 마운트 후 1회: localStorage에서 settings 로드
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const loaded = loadSettings();
     setSettings(loaded);
 
-    // 설정 모달 draft도 동기화
     setDraftSettings(loaded);
     setSettingsDirty(false);
 
     settingsHydratedRef.current = true;
   }, []);
 
-  // ✅ settings 변경 시 자동 저장 (단, 로드 전엔 저장 금지)
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!settingsHydratedRef.current) return;
@@ -681,6 +671,7 @@ export default function Page() {
     setSettingsDirty(false);
     setSettingsOpen(true);
   }
+
   function updateDraft(patch: Partial<AppSettings>) {
     setDraftSettings((prev) => {
       const next = { ...prev, ...patch };
@@ -688,6 +679,7 @@ export default function Page() {
       return next;
     });
   }
+
   function saveDraft() {
     setSettings(draftSettings);
     try {
@@ -695,43 +687,87 @@ export default function Page() {
     } catch {}
     setSettingsDirty(false);
   }
+
   function undoDraft() {
     setDraftSettings(settings);
     setSettingsDirty(false);
   }
-{isOpen && (
-  <div
-    style={{
-      position: "fixed",
-      top: 0,
-      left: 0,
-      width: "100%",
-      height: "100%",
-      background: "rgba(0,0,0,0.4)",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      zIndex: 999,
-    }}
-  >
-    <div
-      style={{
-        position: "relative",
-        width: "500px",
-        height: "600px",
-        background: "white",
-        borderRadius: "12px",
-        padding: "20px",
-      }}
-    >
-      <CloseButton onClose={() => setIsOpen(false)} />
 
-      <div style={{ marginTop: "40px" }}>
-        프롬프트 화면
+  // 🔽🔽🔽 여기부터 중요 (return 안에 넣는 구조)
+
+  return (
+    <div>
+
+      {/* 👉 기존 UI들 그대로 있음 */}
+
+      {/* 📘 규칙 버튼 */}
+      <div style={{ position: "fixed", top: 20, right: 20, zIndex: 9999 }}>
+        <button
+          onClick={() => setIsOpen(true)}
+          style={{
+            padding: "8px 12px",
+            borderRadius: "8px",
+            border: "1px solid #ccc",
+            background: "white",
+            cursor: "pointer",
+          }}
+        >
+          📘 규칙
+        </button>
       </div>
+
+      {/* 📌 팝업 */}
+      {isOpen && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: "100%",
+            background: "rgba(0,0,0,0.4)",
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            zIndex: 999,
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              width: "500px",
+              height: "600px",
+              background: "white",
+              borderRadius: "12px",
+              padding: "20px",
+            }}
+          >
+            {/* ❌ 닫기 버튼 */}
+            <button
+              onClick={() => setIsOpen(false)}
+              style={{
+                position: "absolute",
+                top: "12px",
+                right: "12px",
+                border: "none",
+                background: "transparent",
+                fontSize: "20px",
+                cursor: "pointer",
+              }}
+            >
+              ✕
+            </button>
+
+            <div style={{ marginTop: "40px" }}>
+              프롬프트 화면
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
-  </div>
-)}
+  );
+}
   /* =========================
      URL 중심
   ========================= */
