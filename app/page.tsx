@@ -1,7 +1,31 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+type CloseButtonProps = {
+  onClose: () => void;
+};
 
+function CloseButton({ onClose }: CloseButtonProps) {
+  return (
+    <button
+      onClick={onClose}
+      style={{
+        position: "absolute",
+        top: "12px",
+        right: "12px",
+        width: "32px",
+        height: "32px",
+        border: "none",
+        background: "transparent",
+        cursor: "pointer",
+        fontSize: "20px",
+        fontWeight: "bold",
+      }}
+    >
+      ✕
+    </button>
+  );
+}
 /* =========================
    자동 분할 (긴 글 대응)
 ========================= */
@@ -611,6 +635,10 @@ function applyPixivPreset(rawText: string, stripMeta: boolean): PixivPresetResul
 };
 }
 export default function Page() {
+  const [isOpen, setIsOpen] = useState(false); 
+  <button onClick={() => setIsOpen(true)}>
+  📘 규칙
+</button>
   /* =========================
      Settings (persisted)
   ========================= */
@@ -671,7 +699,39 @@ export default function Page() {
     setDraftSettings(settings);
     setSettingsDirty(false);
   }
+{isOpen && (
+  <div
+    style={{
+      position: "fixed",
+      top: 0,
+      left: 0,
+      width: "100%",
+      height: "100%",
+      background: "rgba(0,0,0,0.4)",
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      zIndex: 999,
+    }}
+  >
+    <div
+      style={{
+        position: "relative",
+        width: "500px",
+        height: "600px",
+        background: "white",
+        borderRadius: "12px",
+        padding: "20px",
+      }}
+    >
+      <CloseButton onClose={() => setIsOpen(false)} />
 
+      <div style={{ marginTop: "40px" }}>
+        프롬프트 화면
+      </div>
+    </div>
+  </div>
+)}
   /* =========================
      URL 중심
   ========================= */
